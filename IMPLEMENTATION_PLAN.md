@@ -113,8 +113,8 @@ Create `.env` with:
 ```env
 ANTHROPIC_API_KEY=sk-ant-...
 GITHUB_TOKEN=ghp_...
-GITHUB_USERNAME=vedant
-AUTHORIZED_PHONE=919876543210@s.whatsapp.net
+GITHUB_USERNAME=vedantjk
+AUTHORIZED_CHAT=120363022735140025@g.us
 DAILY_BUDGET_USD=5.00
 ```
 
@@ -122,88 +122,9 @@ DAILY_BUDGET_USD=5.00
 
 ## Implementation Phases (Build Order)
 
-### Phase 0: Project Scaffold
-**What**: Initialize npm project, TypeScript config, environment setup.
-
-**Files to create:**
-
-#### `package.json`
-```json
-{
-  "name": "dev-bot",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
-  }
-}
-```
-
-#### `tsconfig.json`
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "repos"]
-}
-```
-
-#### `.env.example`
-```env
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-GITHUB_TOKEN=ghp_your-token-here
-GITHUB_USERNAME=your-github-username
-AUTHORIZED_PHONE=919876543210@s.whatsapp.net
-DAILY_BUDGET_USD=5.00
-```
-
-#### `.gitignore`
-```
-node_modules/
-dist/
-.env
-repos/
-auth_info/
-*.db
-```
-
-#### `src/config.ts`
-- Use zod to define and validate all env vars
-- Export a typed `config` object
-- Throw clear errors on missing/invalid values
-- Load dotenv at the top
-
-```typescript
-import 'dotenv/config';
-import { z } from 'zod';
-
-const configSchema = z.object({
-  ANTHROPIC_API_KEY: z.string().min(1),
-  GITHUB_TOKEN: z.string().min(1),
-  GITHUB_USERNAME: z.string().min(1),
-  AUTHORIZED_PHONE: z.string().min(1),
-  DAILY_BUDGET_USD: z.coerce.number().default(5.0),
-});
-
-export const config = configSchema.parse(process.env);
-export type Config = z.infer<typeof configSchema>;
-```
+### Phase 0: Project Scaffold ✅ DONE
+Initialized npm project, TypeScript config, environment setup, global steering files.
+All dependencies installed. Git repo created at https://github.com/vedantjk/dev-bot
 
 ---
 
@@ -452,81 +373,14 @@ class Pipeline {
 
 ---
 
-### Phase 5: WhatsApp Client (`src/whatsapp/client.ts`)
-```typescript
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-} from '@whiskeysockets/baileys';
-import pino from 'pino';
-
-class WhatsAppClient {
-  private socket: ReturnType<typeof makeWASocket> | null = null;
-  private messageHandler: ((sender: string, text: string) => void) | null = null;
-
-  constructor(private authorizedPhone: string) {}
-
-  async connect(): Promise<void> {
-    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
-
-    this.socket = makeWASocket({
-      auth: state,
-      logger: pino({ level: 'silent' }),
-      printQRInTerminal: true,  // QR code shown in terminal on first run
-    });
-
-    // Save credentials on update
-    this.socket.ev.on('creds.update', saveCreds);
-
-    // Handle connection updates (reconnect on disconnect)
-    this.socket.ev.on('connection.update', (update) => {
-      const { connection, lastDisconnect } = update;
-      if (connection === 'close') {
-        const shouldReconnect =
-          (lastDisconnect?.error as any)?.output?.statusCode
-            !== DisconnectReason.loggedOut;
-        if (shouldReconnect) this.connect();
-      }
-      if (connection === 'open') {
-        console.log('WhatsApp connected');
-      }
-    });
-
-    // Listen for messages
-    this.socket.ev.on('messages.upsert', ({ messages }) => {
-      for (const msg of messages) {
-        if (!msg.message || msg.key.fromMe) continue;
-        const sender = msg.key.remoteJid;
-        if (sender !== this.authorizedPhone) continue;
-
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          '';
-
-        if (text && this.messageHandler) {
-          this.messageHandler(sender, text);
-        }
-      }
-    });
-  }
-
-  onMessage(handler: (sender: string, text: string) => void): void {
-    this.messageHandler = handler;
-  }
-
-  async sendMessage(jid: string, text: string): Promise<void> {
-    await this.socket?.sendMessage(jid, { text });
-  }
-}
-```
-
-**Key details:**
-- First run: QR code prints in terminal, scan with WhatsApp
+### Phase 5: WhatsApp Client (`src/whatsapp/client.ts`) ✅ DONE
+Implemented and tested. Key details:
+- Baileys v7 with QR via `qrcode-terminal` (printQRInTerminal deprecated in v7)
 - Session persisted in `./auth_info/` — no QR needed on subsequent runs
 - Auto-reconnect on disconnect (unless logged out)
-- Only process messages from `AUTHORIZED_PHONE`
-- Ignore messages sent by the bot itself (`fromMe`)
+- Filters to `AUTHORIZED_CHAT` (group JID: `120363022735140025@g.us`)
+- In groups, allows own messages (fromMe) so you can send commands from your phone
+- Handles `conversation` and `extendedTextMessage` message types
 
 ---
 
@@ -740,7 +594,7 @@ async function main() {
   const contextManager = new ContextManager('./repos', './global');
   const claudeClient = new ClaudeClient(config.ANTHROPIC_API_KEY);
   const costTracker = new CostTracker('./analytics.db');
-  const whatsapp = new WhatsAppClient(config.AUTHORIZED_PHONE);
+  const whatsapp = new WhatsAppClient(config.AUTHORIZED_CHAT);
   const queue = new TaskQueue();
 
   // Connect WhatsApp
@@ -822,18 +676,18 @@ main().catch(console.error);
 
 ## Implementation Order (Critical Path)
 
-| Step | Phase | Component | Why This Order |
-|------|-------|-----------|---------------|
-| 1 | 0 | Scaffold | Foundation: npm, TypeScript, env config |
-| 2 | 1 | Git Manager | Can test standalone: clone, commit, push |
-| 3 | 2 | Memory/Context | Can test standalone: load files, build prompts |
-| 4 | 3 | Claude Client | Can test with hardcoded prompts |
-| 5 | 4 | Pipeline | Connects Git + Claude + Memory (test via CLI) |
-| 6 | 5 | WhatsApp Client | Now connect the UI layer |
-| 7 | 6 | Message Parser | Parse WhatsApp messages into tasks |
-| 8 | 7 | Cost Tracker | Track spending (SQLite) |
-| 9 | 8 | Task Queue | Handle concurrent requests |
-| 10 | 9 | Entry Point | Wire everything together |
+| Step | Phase | Component | Status |
+|------|-------|-----------|--------|
+| 1 | 0 | Scaffold | ✅ Done |
+| 2 | 5 | WhatsApp Client | ✅ Done |
+| 3 | 6 | Message Parser | Next |
+| 4 | 1 | Git Manager | Pending |
+| 5 | 2 | Memory/Context | Pending |
+| 6 | 3 | Claude Client | Pending |
+| 7 | 7 | Cost Tracker | Pending |
+| 8 | 8 | Task Queue | Pending |
+| 9 | 4 | Pipeline | Pending |
+| 10 | 9 | Entry Point | Pending |
 
 ---
 
@@ -852,11 +706,12 @@ main().catch(console.error);
 
 ## Verification Checklist
 
-- [ ] `npm run dev` — TypeScript compiles clean, process starts
+- [x] `npm run dev` — TypeScript compiles clean, process starts
+- [x] WhatsApp test — scan QR code, connect, receive group messages on PC
 - [ ] Git test — clone a test repo, make a dummy commit, verify it appears on GitHub
 - [ ] Claude test — send a small task, verify file change output parses correctly
 - [ ] Pipeline test — run full pipeline on a test repo ("Add a README")
-- [ ] WhatsApp test — scan QR code, send "help", verify bot responds
+- [ ] WhatsApp e2e — send "help" in group, verify bot responds in group
 - [ ] End-to-end — send "Add hello world to test-repo" via WhatsApp, verify commit on GitHub
 - [ ] Cost test — send "cost" command, verify analytics response
 
