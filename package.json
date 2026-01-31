@@ -1,0 +1,30 @@
+{
+  "name": "dev-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp-to-GitHub coding assistant powered by Claude",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [],
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.72.1",
+    "@octokit/rest": "^22.0.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.2.3",
+    "pino": "^10.3.0",
+    "simple-git": "^3.30.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
