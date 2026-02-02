@@ -19,6 +19,15 @@ export class WhatsAppClient {
   }
 
   async connect(): Promise<void> {
+    // Close previous socket to avoid connectionReplaced loops
+    if (this.socket) {
+      this.socket.ev.removeAllListeners('connection.update');
+      this.socket.ev.removeAllListeners('messages.upsert');
+      this.socket.ev.removeAllListeners('creds.update');
+      this.socket.end(undefined);
+      this.socket = null;
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
     this.socket = makeWASocket({
@@ -39,7 +48,9 @@ export class WhatsAppClient {
       if (connection === 'close') {
         const error = lastDisconnect?.error as Boom | undefined;
         const statusCode = error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const shouldReconnect =
+          statusCode !== DisconnectReason.loggedOut &&
+          statusCode !== DisconnectReason.connectionReplaced;
 
         console.log(
           `Connection closed. Reason: ${DisconnectReason[statusCode ?? 0] ?? statusCode}`,
@@ -48,6 +59,8 @@ export class WhatsAppClient {
         if (shouldReconnect) {
           console.log('Reconnecting...');
           this.connect();
+        } else if (statusCode === DisconnectReason.connectionReplaced) {
+          console.log('Connection replaced by another session. Not reconnecting.');
         } else {
           console.log('Logged out. Delete ./auth_info and restart to re-authenticate.');
         }
@@ -97,5 +110,15 @@ export class WhatsAppClient {
       throw new Error('WhatsApp not connected');
     }
     await this.socket.sendMessage(jid, { text });
+  }
+
+  disconnect(): void {
+    if (this.socket) {
+      this.socket.ev.removeAllListeners('connection.update');
+      this.socket.ev.removeAllListeners('messages.upsert');
+      this.socket.ev.removeAllListeners('creds.update');
+      this.socket.end(undefined);
+      this.socket = null;
+    }
   }
 }

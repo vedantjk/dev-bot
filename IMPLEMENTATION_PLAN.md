@@ -1,14 +1,14 @@
 # WhatsApp-to-GitHub Dev Bot — Implementation Plan
 
-> A WhatsApp bot that receives coding instructions, generates code via Claude API,
-> commits to GitHub, and replies with the commit link.
+> A WhatsApp bot that receives coding instructions, uses Claude as an orchestrator
+> with MCP servers for tool operations, and replies with commit links.
 
 ## Overview
 
 - **Language**: TypeScript (Node.js)
 - **Location**: `C:\Users\vedant\Projects\dev-bot`
-- **Approach**: Build core pipeline first, enhancements later
-- **Docker/MCP**: Deferred — add after core pipeline works
+- **Architecture**: Claude-powered orchestrator with MCP (Model Context Protocol) servers
+- **Approach**: Agentic tool-use loop — Claude decides what tools to call
 
 ---
 
@@ -18,23 +18,20 @@
 WhatsApp (Phone)
     │
     ▼
-Baileys Client (src/whatsapp/client.ts)
+index.ts (serial lock, sends "Working on it...")
     │
     ▼
-Message Parser (src/whatsapp/parser.ts)
+orchestrator.ts (Claude API agentic tool-use loop)
+    │
+    ├── MCP: @modelcontextprotocol/server-filesystem
+    │     └── read_file, write_file, edit_file, list_directory, etc.
+    │
+    └── MCP: dev-bot-server (custom)
+          └── git_clone, git_pull, git_commit_and_push, git_status,
+              create_github_repo, send_status
     │
     ▼
-Task Queue (src/processor/queue.ts)
-    │
-    ▼
-Processing Pipeline (src/processor/pipeline.ts)
-    ├── Memory/Context (src/memory/context.ts)
-    ├── Claude API (src/ai/claude.ts)
-    ├── Git Manager (src/git/manager.ts)
-    └── Cost Tracker (src/analytics/tracker.ts)
-    │
-    ▼
-WhatsApp Reply (commit URL)
+WhatsApp Reply (final message + commit URL)
 ```
 
 ---
@@ -44,22 +41,15 @@ WhatsApp Reply (commit URL)
 ```
 dev-bot/
 ├── src/
-│   ├── index.ts                 # Entry point, wire everything together
-│   ├── config.ts                # Load + validate env vars with zod
+│   ├── index.ts                 # Entry point — WhatsApp → orchestrator wiring
+│   ├── config.ts                # Load + validate env vars with Zod
 │   ├── whatsapp/
-│   │   ├── client.ts            # Baileys client setup, QR auth, message listener
-│   │   └── parser.ts            # Parse messages into TaskRequest | CommandRequest
-│   ├── processor/
-│   │   ├── queue.ts             # Simple async task queue (in-memory)
-│   │   └── pipeline.ts          # Orchestrate: context → Claude → git → reply
+│   │   └── client.ts            # Baileys client setup, QR auth, message listener
 │   ├── ai/
-│   │   └── claude.ts            # Claude API client, prompt building, response parsing
-│   ├── git/
-│   │   └── manager.ts           # Clone, pull, commit, push via simple-git
-│   ├── memory/
-│   │   └── context.ts           # Load AGENTS.md + global steering files
-│   └── analytics/
-│       └── tracker.ts           # SQLite cost tracking + budget enforcement
+│   │   ├── orchestrator.ts      # MCP client setup + Claude agentic loop
+│   │   └── system-prompt.ts     # Reads global/*.md, builds system prompt
+│   └── mcp/
+│       └── dev-bot-server.ts    # Custom MCP server (git, github, send_status tools)
 ├── global/
 │   ├── STEERING.md              # Global dev preferences
 │   ├── CODING_STYLE.md          # Code conventions
@@ -76,6 +66,54 @@ dev-bot/
 
 ---
 
+## MCP Servers
+
+### 1. Community: Filesystem (`@modelcontextprotocol/server-filesystem`)
+- Spawned as child process with `./repos` as allowed directory
+- Provides: `read_file`, `write_file`, `edit_file`, `list_directory`, `directory_tree`, `search_files`, `create_directory`, `move_file`, `get_file_info`
+- Agent uses paths like `repos/my-project/src/index.ts`
+
+### 2. Custom: Dev Bot Server (`src/mcp/dev-bot-server.ts`)
+Built with `@modelcontextprotocol/sdk/server` + `simple-git` + `@octokit/rest`.
+
+| Tool | Purpose |
+|------|---------|
+| `git_clone` | Clone a repo to `./repos/{name}` |
+| `git_pull` | Pull latest changes |
+| `git_commit_and_push` | Stage all, commit, push, return commit URL |
+| `git_status` | Show working tree status |
+| `create_github_repo` | Create a new repo on GitHub via Octokit |
+| `send_status` | Send progress message to WhatsApp (intercepted by orchestrator) |
+
+---
+
+## Orchestrator Design (`src/ai/orchestrator.ts`)
+
+### Startup
+1. Spawn filesystem MCP server: `npx @modelcontextprotocol/server-filesystem ./repos`
+2. Spawn custom MCP server: `npx tsx src/mcp/dev-bot-server.ts` (with env vars)
+3. Connect MCP clients to both via `StdioClientTransport`
+4. Call `client.listTools()` on each → collect all tool definitions
+5. Convert MCP tool schemas to Anthropic API tool format
+
+### Agentic Loop (per request)
+1. Build messages array with user's WhatsApp text
+2. Call Claude API with system prompt + all tools
+3. If `stop_reason === 'tool_use'`:
+   - For each tool_use block, route to correct MCP server via `client.callTool()`
+   - `send_status` is intercepted and handled in-process (calls WhatsApp directly)
+   - Feed results back as tool_result messages
+   - Continue loop
+4. If `stop_reason === 'end_turn'`: extract text, return as final WhatsApp reply
+5. Safety: max 25 turns
+
+### Config
+- Model: `claude-sonnet-4-20250514`
+- Max tokens: 8192
+- Max turns: 25
+
+---
+
 ## Dependencies
 
 ### Production
@@ -83,27 +121,20 @@ dev-bot/
 |---------|---------|
 | `@whiskeysockets/baileys` | WhatsApp Web multi-device API |
 | `@anthropic-ai/sdk` | Claude API client |
+| `@modelcontextprotocol/sdk` | MCP client + server SDK |
+| `@modelcontextprotocol/server-filesystem` | Community filesystem MCP server |
 | `simple-git` | Local git operations (clone, commit, push) |
-| `@octokit/rest` | GitHub REST API (verify repos, get branches) |
-| `better-sqlite3` | SQLite for cost tracking analytics |
+| `@octokit/rest` | GitHub REST API (create repos) |
 | `pino` | Logger (required by Baileys) |
 | `dotenv` | Load .env file |
-| `zod` | Schema validation for config + message parsing |
+| `zod` | Schema validation for config + MCP tool schemas |
 
 ### Dev
 | Package | Purpose |
 |---------|---------|
 | `typescript` | TypeScript compiler |
 | `tsx` | Run .ts files directly in dev mode |
-| `@types/better-sqlite3` | Type definitions |
 | `@types/node` | Node.js type definitions |
-
-### Install Commands
-```bash
-npm init -y
-npm install @whiskeysockets/baileys @anthropic-ai/sdk simple-git @octokit/rest better-sqlite3 pino dotenv zod
-npm install -D typescript tsx @types/better-sqlite3 @types/node
-```
 
 ---
 
@@ -120,609 +151,41 @@ DAILY_BUDGET_USD=5.00
 
 ---
 
-## Implementation Phases (Build Order)
-
-### Phase 0: Project Scaffold ✅ DONE
-Initialized npm project, TypeScript config, environment setup, global steering files.
-All dependencies installed. Git repo created at https://github.com/vedantjk/dev-bot
-
----
-
-### Phase 1: Git Operations (`src/git/manager.ts`)
-**Why first**: Can be tested standalone from CLI without WhatsApp.
-
-**Functions:**
-```typescript
-class GitManager {
-  constructor(githubToken: string, githubUsername: string, reposDir: string)
-
-  // Clone repo if not present, pull if exists
-  async ensureRepo(repoName: string): Promise<string>  // returns repo path
-
-  // List files in repo (filtered by extension)
-  async getRepoFiles(repoName: string, extensions?: string[]): Promise<string[]>
-
-  // Read a single file from repo
-  async readRepoFile(repoName: string, filePath: string): Promise<string>
-
-  // Apply file changes, commit, push, return commit URL
-  async applyChanges(
-    repoName: string,
-    files: Array<{ filePath: string; content: string }>,
-    commitMessage: string
-  ): Promise<{ commitUrl: string; sha: string }>
-
-  // Get default branch name (main vs master)
-  async getDefaultBranch(repoName: string): Promise<string>
-}
-```
-
-**Key details:**
-- Clone URL format: `https://{token}@github.com/{username}/{repo}.git`
-- Before commit: always `git pull --rebase` to avoid conflicts
-- After push: construct URL as `https://github.com/{username}/{repo}/commit/{sha}`
-- Validate: never write to `.git/`, `node_modules/`, or lock files
-
----
-
-### Phase 2: Project Memory (`src/memory/context.ts`)
-**Functions:**
-```typescript
-class ContextManager {
-  constructor(reposDir: string, globalDir: string)
-
-  // Load AGENTS.md from repo directory
-  loadProjectContext(repoName: string): string | null
-
-  // Load all global config files
-  loadGlobalConfig(): { steering: string; codingStyle: string; frameworks: string }
-
-  // Build complete system prompt for Claude
-  buildSystemPrompt(repoName: string): string
-
-  // Append new context to AGENTS.md after successful commit
-  updateAgentsMd(repoName: string, summary: string): void
-}
-```
-
-**System prompt template:**
-```
-You are a coding assistant. You will receive a task and must produce code changes.
-
-## Project: {repoName}
-{AGENTS.md content}
-
-## Global Preferences
-{STEERING.md content}
-
-## Coding Style
-{CODING_STYLE.md content}
-
-## Output Format
-For each file you want to create or modify, use this exact format:
-
---- FILE: path/to/file.ts ---
-[complete file content here]
---- END FILE ---
-
---- COMMIT: your commit message here ---
-
-Only output files that need changes. Include the COMPLETE file content, not diffs.
-```
-
-**Create default global files on first run:**
-
-`global/STEERING.md`:
-```markdown
-# Global Development Preferences
-
-## Code Style
-- 2 space indentation
-- Single quotes for strings
-- Trailing commas
-- Max line length: 100
-
-## Commit Messages
-- Format: "feat: description" or "fix: description"
-- Types: feat, fix, docs, refactor, test, chore
-
-## Security Rules
-- Never commit secrets or .env files
-- Always validate user inputs
-- Use parameterized queries for databases
-```
-
-`global/CODING_STYLE.md`:
-```markdown
-# Coding Style Guide
-
-- Prefer async/await over raw promises
-- Use TypeScript strict mode
-- Prefer const over let, never use var
-- Use descriptive variable names
-- Keep functions small and focused
-```
-
-`global/FRAMEWORKS.md`:
-```markdown
-# Preferred Frameworks & Tools
-
-- Frontend: React, Next.js, TailwindCSS
-- Backend: Node.js, Express, Fastify
-- Database: PostgreSQL, SQLite
-- ORM: Prisma, Drizzle
-- Testing: Vitest, Jest
-- Validation: Zod
-```
-
----
-
-### Phase 3: Claude API Integration (`src/ai/claude.ts`)
-**Functions:**
-```typescript
-interface FileChange {
-  filePath: string;
-  content: string;
-}
-
-interface GenerationResult {
-  files: FileChange[];
-  commitMessage: string;
-  tokensIn: number;
-  tokensOut: number;
-}
-
-class ClaudeClient {
-  constructor(apiKey: string)
-
-  // Generate code changes for a task
-  async generateChanges(
-    systemPrompt: string,
-    task: string,
-    existingFiles: Array<{ path: string; content: string }>
-  ): Promise<GenerationResult>
-
-  // Parse Claude's response into structured file changes
-  private parseResponse(response: string): { files: FileChange[]; commitMessage: string }
-}
-```
-
-**Key details:**
-- Model: `claude-sonnet-4-20250514` (good balance of speed/quality/cost)
-- Max tokens: 4096 for output
-- Parse response using regex to extract `--- FILE: ... ---` blocks
-- Extract commit message from `--- COMMIT: ... ---` block
-- Read `usage.input_tokens` and `usage.output_tokens` from API response
-- Cost calculation: Sonnet pricing ($3/1M input, $15/1M output)
-
-**Response parsing regex:**
-```typescript
-const FILE_PATTERN = /--- FILE: (.+?) ---\n([\s\S]*?)--- END FILE ---/g;
-const COMMIT_PATTERN = /--- COMMIT: (.+?) ---/;
-```
-
----
-
-### Phase 4: Processing Pipeline (`src/processor/pipeline.ts`)
-**The core orchestrator that connects all components.**
-
-```typescript
-class Pipeline {
-  constructor(
-    gitManager: GitManager,
-    contextManager: ContextManager,
-    claudeClient: ClaudeClient,
-    costTracker: CostTracker,
-    sendMessage: (text: string) => Promise<void>  // WhatsApp reply function
-  )
-
-  async processTask(repoName: string, task: string): Promise<string> {
-    // 1. Check budget
-    sendMessage("Checking budget...");
-    if (!costTracker.checkBudget()) {
-      throw new Error("Daily budget exceeded");
-    }
-
-    // 2. Ensure repo is cloned and up to date
-    sendMessage(`Pulling latest from ${repoName}...`);
-    await gitManager.ensureRepo(repoName);
-
-    // 3. Load project context
-    const systemPrompt = contextManager.buildSystemPrompt(repoName);
-
-    // 4. Gather existing files for context
-    sendMessage("Reading project files...");
-    const files = await gitManager.getRepoFiles(repoName);
-    const existingFiles = [];
-    for (const file of files.slice(0, 50)) {  // Limit to 50 files
-      const content = await gitManager.readRepoFile(repoName, file);
-      if (content.length < 10000) {  // Skip very large files
-        existingFiles.push({ path: file, content });
-      }
-    }
-
-    // 5. Generate code with Claude
-    sendMessage("Generating code with Claude...");
-    const result = await claudeClient.generateChanges(systemPrompt, task, existingFiles);
-
-    // 6. Apply changes and commit
-    sendMessage(`Committing ${result.files.length} file(s)...`);
-    const { commitUrl } = await gitManager.applyChanges(
-      repoName, result.files, result.commitMessage
-    );
-
-    // 7. Track cost
-    costTracker.recordRequest({
-      repoName,
-      requestText: task,
-      tokensInput: result.tokensIn,
-      tokensOutput: result.tokensOut,
-      success: true,
-    });
-
-    // 8. Update AGENTS.md
-    contextManager.updateAgentsMd(repoName,
-      `- ${result.commitMessage} (${new Date().toISOString().split('T')[0]})`
-    );
-
-    // 9. Return commit URL
-    return commitUrl;
-  }
-}
-```
-
----
-
-### Phase 5: WhatsApp Client (`src/whatsapp/client.ts`) ✅ DONE
-Implemented and tested. Key details:
-- Baileys v7 with QR via `qrcode-terminal` (printQRInTerminal deprecated in v7)
-- Session persisted in `./auth_info/` — no QR needed on subsequent runs
-- Auto-reconnect on disconnect (unless logged out)
-- Filters to `AUTHORIZED_CHAT` (group JID: `120363022735140025@g.us`)
-- In groups, allows own messages (fromMe) so you can send commands from your phone
-- Handles `conversation` and `extendedTextMessage` message types
-
----
-
-### Phase 6: Message Parser (`src/whatsapp/parser.ts`)
-```typescript
-import { z } from 'zod';
-
-type ParsedMessage =
-  | { type: 'task'; repo: string; task: string }
-  | { type: 'command'; command: 'status' | 'cost' | 'help' | 'repos' };
-
-function parseMessage(text: string): ParsedMessage {
-  const trimmed = text.trim().toLowerCase();
-
-  // Check for commands first
-  if (['status', 'cost', 'help', 'repos'].includes(trimmed)) {
-    return { type: 'command', command: trimmed as any };
-  }
-
-  // Pattern 1: "repo-name: task description"
-  const colonMatch = text.match(/^([\w-]+):\s*(.+)$/s);
-  if (colonMatch) {
-    return { type: 'task', repo: colonMatch[1], task: colonMatch[2].trim() };
-  }
-
-  // Pattern 2: "task description to repo-name"
-  const toMatch = text.match(/^(.+)\s+to\s+([\w-]+)$/s);
-  if (toMatch) {
-    return { type: 'task', repo: toMatch[2], task: toMatch[1].trim() };
-  }
-
-  // Pattern 3: "task description in repo-name"
-  const inMatch = text.match(/^(.+)\s+in\s+([\w-]+)$/s);
-  if (inMatch) {
-    return { type: 'task', repo: inMatch[2], task: inMatch[1].trim() };
-  }
-
-  // Can't parse — ask for clarification
-  throw new Error(
-    'Could not parse request. Use format:\n' +
-    '• "repo-name: task description"\n' +
-    '• "task description to repo-name"\n' +
-    '• "task description in repo-name"'
-  );
-}
-```
-
----
-
-### Phase 7: Cost Tracker (`src/analytics/tracker.ts`)
-```typescript
-import Database from 'better-sqlite3';
-
-class CostTracker {
-  private db: Database.Database;
-
-  // Sonnet pricing per 1M tokens
-  private static INPUT_COST = 3.0;
-  private static OUTPUT_COST = 15.0;
-
-  constructor(dbPath: string = './analytics.db') {
-    this.db = new Database(dbPath);
-    this.initTables();
-  }
-
-  private initTables(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        repo_name TEXT NOT NULL,
-        request_text TEXT NOT NULL,
-        tokens_input INTEGER NOT NULL,
-        tokens_output INTEGER NOT NULL,
-        cost_usd REAL NOT NULL,
-        processing_time_ms INTEGER,
-        success BOOLEAN NOT NULL DEFAULT 1
-      );
-      CREATE TABLE IF NOT EXISTS daily_summary (
-        date TEXT PRIMARY KEY,
-        total_requests INTEGER DEFAULT 0,
-        total_tokens INTEGER DEFAULT 0,
-        total_cost REAL DEFAULT 0,
-        repos_modified INTEGER DEFAULT 0
-      );
-    `);
-  }
-
-  recordRequest(data: {
-    repoName: string;
-    requestText: string;
-    tokensInput: number;
-    tokensOutput: number;
-    processingTimeMs?: number;
-    success: boolean;
-  }): void {
-    const cost =
-      (data.tokensInput / 1_000_000) * CostTracker.INPUT_COST +
-      (data.tokensOutput / 1_000_000) * CostTracker.OUTPUT_COST;
-
-    this.db.prepare(`
-      INSERT INTO requests (repo_name, request_text, tokens_input, tokens_output,
-                           cost_usd, processing_time_ms, success)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      data.repoName, data.requestText, data.tokensInput, data.tokensOutput,
-      cost, data.processingTimeMs ?? null, data.success ? 1 : 0
-    );
-  }
-
-  checkBudget(dailyLimit: number): boolean {
-    const row = this.db.prepare(`
-      SELECT COALESCE(SUM(cost_usd), 0) as total
-      FROM requests
-      WHERE date(timestamp) = date('now')
-    `).get() as { total: number };
-    return row.total < dailyLimit;
-  }
-
-  getDailySummary(): string {
-    const today = this.db.prepare(`
-      SELECT COUNT(*) as requests, COALESCE(SUM(cost_usd), 0) as cost,
-             COALESCE(SUM(tokens_input + tokens_output), 0) as tokens
-      FROM requests WHERE date(timestamp) = date('now')
-    `).get() as any;
-
-    const month = this.db.prepare(`
-      SELECT COUNT(*) as requests, COALESCE(SUM(cost_usd), 0) as cost
-      FROM requests WHERE strftime('%Y-%m', timestamp) = strftime('%Y-%m', 'now')
-    `).get() as any;
-
-    return [
-      `Today: ${today.requests} requests, $${today.cost.toFixed(2)}`,
-      `This month: ${month.requests} requests, $${month.cost.toFixed(2)}`,
-    ].join('\n');
-  }
-}
-```
-
----
-
-### Phase 8: Task Queue (`src/processor/queue.ts`)
-```typescript
-type Task = {
-  id: string;
-  repoName: string;
-  taskDescription: string;
-  senderId: string;
-};
-
-class TaskQueue {
-  private queue: Task[] = [];
-  private processing = false;
-  private processor: ((task: Task) => Promise<void>) | null = null;
-
-  setProcessor(fn: (task: Task) => Promise<void>): void {
-    this.processor = fn;
-  }
-
-  async enqueue(task: Task): Promise<void> {
-    this.queue.push(task);
-    if (!this.processing) {
-      await this.processNext();
-    }
-  }
-
-  private async processNext(): Promise<void> {
-    if (this.queue.length === 0 || !this.processor) {
-      this.processing = false;
-      return;
-    }
-
-    this.processing = true;
-    const task = this.queue.shift()!;
-
-    try {
-      await this.processor(task);
-    } catch (error) {
-      console.error(`Task failed: ${task.id}`, error);
-    }
-
-    await this.processNext();
-  }
-
-  get length(): number {
-    return this.queue.length;
-  }
-}
-```
-
----
-
-### Phase 9: Entry Point (`src/index.ts`)
-```typescript
-import { config } from './config.js';
-import { WhatsAppClient } from './whatsapp/client.js';
-import { parseMessage } from './whatsapp/parser.js';
-import { GitManager } from './git/manager.js';
-import { ContextManager } from './memory/context.js';
-import { ClaudeClient } from './ai/claude.js';
-import { CostTracker } from './analytics/tracker.js';
-import { Pipeline } from './processor/pipeline.js';
-import { TaskQueue } from './processor/queue.js';
-import { randomUUID } from 'crypto';
-
-async function main() {
-  console.log('Starting Dev Bot...');
-
-  // Initialize components
-  const gitManager = new GitManager(config.GITHUB_TOKEN, config.GITHUB_USERNAME, './repos');
-  const contextManager = new ContextManager('./repos', './global');
-  const claudeClient = new ClaudeClient(config.ANTHROPIC_API_KEY);
-  const costTracker = new CostTracker('./analytics.db');
-  const whatsapp = new WhatsAppClient(config.AUTHORIZED_CHAT);
-  const queue = new TaskQueue();
-
-  // Connect WhatsApp
-  await whatsapp.connect();
-
-  // Set up queue processor
-  queue.setProcessor(async (task) => {
-    const sendReply = (text: string) =>
-      whatsapp.sendMessage(task.senderId, text);
-
-    const pipeline = new Pipeline(
-      gitManager, contextManager, claudeClient, costTracker, sendReply
-    );
-
-    try {
-      const commitUrl = await pipeline.processTask(task.repoName, task.taskDescription);
-      await sendReply(`Done! ${commitUrl}`);
-    } catch (error: any) {
-      await sendReply(`Error: ${error.message}`);
-    }
-  });
-
-  // Handle incoming messages
-  whatsapp.onMessage(async (sender, text) => {
-    try {
-      const parsed = parseMessage(text);
-
-      if (parsed.type === 'command') {
-        switch (parsed.command) {
-          case 'help':
-            await whatsapp.sendMessage(sender,
-              'Commands:\n' +
-              '• "repo-name: task" — generate code\n' +
-              '• "status" — queue status\n' +
-              '• "cost" — usage analytics\n' +
-              '• "repos" — list repos\n' +
-              '• "help" — this message'
-            );
-            break;
-          case 'cost':
-            await whatsapp.sendMessage(sender, costTracker.getDailySummary());
-            break;
-          case 'status':
-            await whatsapp.sendMessage(sender,
-              `Queue: ${queue.length} task(s) pending`
-            );
-            break;
-          case 'repos':
-            // List directories in ./repos
-            await whatsapp.sendMessage(sender, 'Repos: (check ./repos directory)');
-            break;
-        }
-        return;
-      }
-
-      // Task request
-      await whatsapp.sendMessage(sender,
-        `Queued: "${parsed.task}" for ${parsed.repo}`
-      );
-      await queue.enqueue({
-        id: randomUUID(),
-        repoName: parsed.repo,
-        taskDescription: parsed.task,
-        senderId: sender,
-      });
-
-    } catch (error: any) {
-      await whatsapp.sendMessage(sender, error.message);
-    }
-  });
-
-  console.log('Dev Bot running. Waiting for WhatsApp messages...');
-}
-
-main().catch(console.error);
-```
-
----
-
-## Implementation Order (Critical Path)
-
-| Step | Phase | Component | Status |
-|------|-------|-----------|--------|
-| 1 | 0 | Scaffold | ✅ Done |
-| 2 | 5 | WhatsApp Client | ✅ Done |
-| 3 | 6 | Message Parser | Next |
-| 4 | 1 | Git Manager | Pending |
-| 5 | 2 | Memory/Context | Pending |
-| 6 | 3 | Claude Client | Pending |
-| 7 | 7 | Cost Tracker | Pending |
-| 8 | 8 | Task Queue | Pending |
-| 9 | 4 | Pipeline | Pending |
-| 10 | 9 | Entry Point | Pending |
-
----
-
-## Risks & Mitigations
-
-| Risk | Mitigation |
-|------|-----------|
-| Claude generates invalid/broken code | Validate file paths; never overwrite `.git/`, `node_modules/`, lock files |
-| Git push fails (auth, conflicts) | Always pull before commit; clear error messages back to WhatsApp |
-| WhatsApp session drops | Baileys auto-reconnect; persist auth state in `./auth_info/` |
-| Large repos blow up Claude context | Send only 50 files max, skip files >10KB, filter by extension |
-| Cost overruns | Daily budget check before each request; hard stop at limit |
-| Claude response doesn't match expected format | Robust regex parsing with fallback error handling |
+## Implementation Status
+
+| Component | File | Status |
+|-----------|------|--------|
+| Project Scaffold | package.json, tsconfig.json | ✅ Done |
+| WhatsApp Client | src/whatsapp/client.ts | ✅ Done |
+| Config | src/config.ts | ✅ Done |
+| Global Steering | global/*.md | ✅ Done |
+| Custom MCP Server | src/mcp/dev-bot-server.ts | ✅ Done |
+| System Prompt | src/ai/system-prompt.ts | ✅ Done |
+| Orchestrator | src/ai/orchestrator.ts | ✅ Done |
+| Entry Point | src/index.ts | ✅ Done |
 
 ---
 
 ## Verification Checklist
 
-- [x] `npm run dev` — TypeScript compiles clean, process starts
-- [x] WhatsApp test — scan QR code, connect, receive group messages on PC
-- [ ] Git test — clone a test repo, make a dummy commit, verify it appears on GitHub
-- [ ] Claude test — send a small task, verify file change output parses correctly
-- [ ] Pipeline test — run full pipeline on a test repo ("Add a README")
-- [ ] WhatsApp e2e — send "help" in group, verify bot responds in group
-- [ ] End-to-end — send "Add hello world to test-repo" via WhatsApp, verify commit on GitHub
-- [ ] Cost test — send "cost" command, verify analytics response
+- [x] `npm run dev` — TypeScript compiles clean
+- [x] WhatsApp test — scan QR code, connect, receive group messages
+- [ ] MCP test — orchestrator spawns both MCP servers, lists tools
+- [ ] Claude test — send a small task, verify tool-use loop works
+- [ ] End-to-end — send "Create a new repo called test-project" via WhatsApp
+- [ ] End-to-end — send "Add a README.md to test-project" → verify commit on GitHub
 
 ---
 
-## Future Enhancements (Post-MVP)
+## MVP Backlog
 
-- [ ] MCP Build Server (Docker) — isolated build/test environment
-- [ ] Prompt caching — reuse project context for 90% cost reduction
-- [ ] Multi-file chunking — break large features into 150-200 line commits
-- [ ] Branch support — create feature branches instead of committing to main
-- [ ] Conversation mode — follow-up messages refine the same task
-- [ ] File filtering — smart selection of which files to send as context
-- [ ] Budget alerts — WhatsApp notification at 80% of daily budget
+- [ ] **Mid-execution message injection** — if the user sends a message while the bot is working, pause the agentic loop and incorporate the new input before continuing. Currently the serial lock rejects messages during execution. The challenge: Claude API calls are blocking, so injection can only happen between turns (when control returns to the orchestrator). Approach: buffer incoming messages during execution, and before each Claude API call check the buffer — if there's a new message, append it to the conversation as a user message. Won't interrupt a long tool call or an in-flight API request, but catches the gap between turns. A multi-agent setup (planner + executor) would give more natural injection points.
+- [ ] Cost tracking with SQLite (budget enforcement per request)
+- [ ] Prompt caching for system prompt + project context
+- [ ] Branch support (feature branches instead of main)
+- [ ] Conversation memory (follow-up messages refine same task)
+
+## Future Enhancements
+
+- [ ] Docker MCP server for isolated build/test environments
+- [ ] Budget alerts at 80% of daily limit
