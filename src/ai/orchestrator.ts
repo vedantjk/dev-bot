@@ -1,148 +1,203 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { resolve } from 'path';
+import { readdirSync } from 'fs';
+import simpleGit from 'simple-git';
 import { config } from '../config.js';
-import { buildSystemPrompt } from './system-prompt.js';
-
-interface McpToolEntry {
-  client: Client;
-  name: string;
-}
+import { buildCoderPrompt, buildReviewerPrompt, buildCommitterPrompt } from './system-prompt.js';
 
 interface OrchestratorOptions {
   onStatusMessage?: (message: string) => void;
 }
 
-const MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS = 8192;
-const MAX_TURNS = 25;
+type AgentType = 'coder' | 'reviewer' | 'committer';
 
-// Sonnet pricing per 1M tokens
-const INPUT_COST_PER_M = 3.0;
-const OUTPUT_COST_PER_M = 15.0;
-
-function calcCost(inputTokens: number, outputTokens: number): number {
-  return (inputTokens / 1_000_000) * INPUT_COST_PER_M
-    + (outputTokens / 1_000_000) * OUTPUT_COST_PER_M;
+interface AgentConfig {
+  systemPrompt: string;
+  disallowedTools: string[];
+  maxTurns: number;
 }
 
+// Tools we always block for every agent
+const ALWAYS_BLOCKED = [
+  'Bash', 'Task', 'Skill', 'TodoWrite', 'TodoRead', 'NotebookEdit',
+];
+
+// Every MCP tool exposed by dev-bot-server
+const ALL_MCP_TOOLS = [
+  'mcp__dev-bot__git_clone',
+  'mcp__dev-bot__git_pull',
+  'mcp__dev-bot__git_status',
+  'mcp__dev-bot__git_diff',
+  'mcp__dev-bot__git_commit_and_push',
+  'mcp__dev-bot__create_github_repo',
+  'mcp__dev-bot__delete_file',
+  'mcp__dev-bot__send_status',
+  'mcp__dev-bot__write_steering_file',
+  'mcp__dev-bot__docker_build',
+];
+
+/** Return all MCP tool names EXCEPT the ones listed. */
+function mcpToolsExcept(...allowed: string[]): string[] {
+  return ALL_MCP_TOOLS.filter((t) => !allowed.includes(t));
+}
+
+/** Per-agent configs: system prompt, disallowed tools, max turns. */
+const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
+  coder: {
+    systemPrompt: buildCoderPrompt(),
+    maxTurns: 25,
+    disallowedTools: [
+      ...ALWAYS_BLOCKED,
+      'WebSearch', 'WebFetch',
+      ...mcpToolsExcept(
+        'mcp__dev-bot__git_clone',
+        'mcp__dev-bot__git_pull',
+        'mcp__dev-bot__delete_file',
+        'mcp__dev-bot__docker_build',
+      ),
+    ],
+  },
+  reviewer: {
+    systemPrompt: buildReviewerPrompt(),
+    maxTurns: 10,
+    disallowedTools: [
+      ...ALWAYS_BLOCKED,
+      'Write', 'Edit',
+      ...mcpToolsExcept(
+        'mcp__dev-bot__git_status',
+        'mcp__dev-bot__git_diff',
+        'mcp__dev-bot__write_steering_file',
+      ),
+    ],
+  },
+  committer: {
+    systemPrompt: buildCommitterPrompt(),
+    maxTurns: 5,
+    disallowedTools: [
+      ...ALWAYS_BLOCKED,
+      'Write', 'Edit', 'WebSearch', 'WebFetch',
+      ...mcpToolsExcept(
+        'mcp__dev-bot__git_status',
+        'mcp__dev-bot__git_commit_and_push',
+        'mcp__dev-bot__create_github_repo',
+      ),
+    ],
+  },
+};
+
 export class Orchestrator {
-  private anthropic: Anthropic;
-  private mcpClients: Client[] = [];
-  private transports: StdioClientTransport[] = [];
-  private toolMap: Map<string, McpToolEntry> = new Map();
-  private anthropicTools: Anthropic.Tool[] = [];
-  private systemPrompt: string;
-  private onStatusMessage: ((message: string) => void) | null = null;
+  private onStatusMessage: ((message: string) => void) | null;
 
   constructor(options?: OrchestratorOptions) {
-    this.anthropic = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
-    this.systemPrompt = buildSystemPrompt();
     this.onStatusMessage = options?.onStatusMessage ?? null;
   }
 
   async start(): Promise<void> {
-    await this.spawnFilesystemServer();
-    await this.spawnDevBotServer();
-    await this.collectTools();
-    console.log(`Orchestrator ready with ${this.anthropicTools.length} tools`);
+    console.log('Orchestrator ready (manual chaining mode)');
   }
 
   async shutdown(): Promise<void> {
-    for (const client of this.mcpClients) {
-      try {
-        await client.close();
-      } catch {}
-    }
-    for (const transport of this.transports) {
-      try {
-        await transport.close();
-      } catch {}
-    }
+    console.log('Orchestrator shutdown');
   }
 
-  private async spawnFilesystemServer(): Promise<void> {
-    const transport = new StdioClientTransport({
-      command: 'npx',
-      args: ['@modelcontextprotocol/server-filesystem', './repos'],
-      stderr: 'pipe',
-    });
+  /** Run a single agent as an independent query() call. */
+  private async runAgent(prompt: string, agent: AgentType): Promise<string> {
+    const cfg = AGENT_CONFIGS[agent];
+    let finalResult = '(no response)';
 
-    const client = new Client({ name: 'fs-client', version: '1.0.0' });
-    await client.connect(transport);
+    console.log(`\n--- ${agent.toUpperCase()} AGENT ---`);
 
-    this.mcpClients.push(client);
-    this.transports.push(transport);
-    console.log('Filesystem MCP server connected');
-  }
-
-  private async spawnDevBotServer(): Promise<void> {
-    const transport = new StdioClientTransport({
-      command: 'npx',
-      args: ['tsx', 'src/mcp/dev-bot-server.ts'],
-      env: {
-        ...process.env as Record<string, string>,
-        GITHUB_USERNAME: config.GITHUB_USERNAME,
-        REPOS_DIR: './repos',
-      },
-      stderr: 'pipe',
-    });
-
-    const client = new Client({ name: 'devbot-client', version: '1.0.0' });
-    await client.connect(transport);
-
-    this.mcpClients.push(client);
-    this.transports.push(transport);
-    console.log('Dev Bot MCP server connected');
-  }
-
-  private async collectTools(): Promise<void> {
-    for (const client of this.mcpClients) {
-      const { tools } = await client.listTools();
-      for (const tool of tools) {
-        this.toolMap.set(tool.name, { client, name: tool.name });
-        this.anthropicTools.push({
-          name: tool.name,
-          description: tool.description ?? '',
-          input_schema: {
-            type: 'object' as const,
-            properties: tool.inputSchema.properties ?? {},
-            required: tool.inputSchema.required,
+    for await (const message of query({
+      prompt,
+      options: {
+        cwd: resolve('.'),
+        disallowedTools: cfg.disallowedTools,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        maxTurns: cfg.maxTurns,
+        systemPrompt: {
+          type: 'preset',
+          preset: 'claude_code',
+          append: cfg.systemPrompt,
+        },
+        mcpServers: {
+          'dev-bot': {
+            command: 'npx',
+            args: ['tsx', 'src/mcp/dev-bot-server.ts'],
+            env: {
+              GITHUB_USERNAME: config.GITHUB_USERNAME,
+              GITHUB_TOKEN: config.GITHUB_TOKEN,
+              REPOS_DIR: resolve('./repos'),
+              GLOBAL_DIR: resolve('./global'),
+            },
           },
-        });
+        },
+        env: {
+          ANTHROPIC_API_KEY: config.ANTHROPIC_API_KEY,
+        },
+      },
+    })) {
+      if (message.type === 'system' && message.subtype === 'init') {
+        console.log(`  [init] model: ${message.model}, tools: ${message.tools.length}`);
       }
+
+      if (message.type === 'assistant') {
+        for (const block of message.message.content) {
+          if (typeof block === 'object' && 'text' in block && typeof block.text === 'string') {
+            console.log(`  [text] ${block.text.slice(0, 200)}${block.text.length > 200 ? '...' : ''}`);
+          }
+          if (typeof block === 'object' && 'name' in block) {
+            const input = JSON.stringify((block as any).input ?? {});
+            console.log(`  [tool] ${(block as any).name}(${input.slice(0, 150)}${input.length > 150 ? '...' : ''})`);
+          }
+        }
+      }
+
+      if (message.type === 'result') {
+        if (message.subtype === 'success') {
+          finalResult = message.result || '(no response)';
+        } else {
+          finalResult = `Error: ${message.errors.join('; ')}`;
+        }
+        console.log(`  [result] ${message.subtype} — $${message.total_cost_usd.toFixed(4)} | ${message.num_turns} turns | ${message.duration_ms}ms`);
+      }
+    }
+
+    return finalResult;
+  }
+
+  /** Stage all changes in every repo so git diff --staged shows the full picture. */
+  private async stageAllRepos(): Promise<void> {
+    const reposDir = resolve('./repos');
+    try {
+      const entries = readdirSync(reposDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const repoPath = resolve(reposDir, entry.name);
+        const git = simpleGit(repoPath);
+        const status = await git.status();
+        const hasChanges =
+          status.modified.length > 0 ||
+          status.created.length > 0 ||
+          status.deleted.length > 0 ||
+          status.not_added.length > 0;
+        if (hasChanges) {
+          await git.add('-A');
+          console.log(`  [staged] ${entry.name}`);
+        }
+      }
+    } catch {
+      // repos/ dir may not exist yet — that's fine
     }
   }
 
-  private async executeTool(
-    name: string,
-    input: Record<string, unknown>,
-  ): Promise<{ content: string; isError: boolean }> {
-    // Intercept send_status — handle in parent process directly
-    if (name === 'send_status') {
-      const message = String(input.message ?? '');
-      if (this.onStatusMessage) {
-        this.onStatusMessage(message);
-      }
-      return { content: `Status sent: "${message}"`, isError: false };
-    }
-
-    const entry = this.toolMap.get(name);
-    if (!entry) {
-      return { content: `Unknown tool: ${name}`, isError: true };
-    }
-
-    const result = await entry.client.callTool({
-      name,
-      arguments: input,
-    });
-
-    const textContent = (result.content as any[])
-      ?.filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text)
-      .join('\n') ?? '';
-
-    return { content: textContent, isError: result.isError === true };
+  /** Extract MUST-FIX items from reviewer output. Returns null if none. */
+  private parseMustFix(reviewResult: string): string | null {
+    const match = reviewResult.match(/### MUST-FIX\s*\n([\s\S]*?)(?=### SUGGESTIONS|$)/);
+    if (!match) return null;
+    const items = match[1].trim();
+    if (!items || items.toLowerCase() === 'none') return null;
+    return items;
   }
 
   async handleRequest(userMessage: string): Promise<string> {
@@ -150,94 +205,84 @@ export class Orchestrator {
     console.log(`REQUEST: ${userMessage}`);
     console.log('='.repeat(60));
 
-    const messages: Anthropic.MessageParam[] = [
-      { role: 'user', content: userMessage },
-    ];
+    const sendStatus = (msg: string) => {
+      console.log(`[status] ${msg}`);
+      this.onStatusMessage?.(msg);
+    };
 
-    let totalIn = 0;
-    let totalOut = 0;
+    try {
+      // Phase 1: Coder — set up repo and implement changes
+      sendStatus('Coding in progress...');
+      const coderResult = await this.runAgent(userMessage, 'coder');
 
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
-      console.log(`\n--- Turn ${turn + 1}/${MAX_TURNS} ---`);
+      // Stage all changes so the reviewer sees new files via git diff --staged
+      await this.stageAllRepos();
 
-      const response = await this.anthropic.messages.create({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: this.systemPrompt,
-        tools: this.anthropicTools,
-        messages,
-      });
+      // Phase 2: Reviewer — review the diff
+      sendStatus('Reviewing changes...');
+      const reviewerPrompt = [
+        `The user requested: "${userMessage}"`,
+        '',
+        'The coder has completed the work. Their summary:',
+        coderResult,
+        '',
+        'Review the changes made in the repository. Use git_diff with staged=true to see all changes including new files.',
+      ].join('\n');
+      const reviewResult = await this.runAgent(reviewerPrompt, 'reviewer');
 
-      totalIn += response.usage.input_tokens;
-      totalOut += response.usage.output_tokens;
-      const turnCost = calcCost(response.usage.input_tokens, response.usage.output_tokens);
-
-      console.log(`  stop_reason: ${response.stop_reason}`);
-      console.log(`  tokens: ${response.usage.input_tokens} in / ${response.usage.output_tokens} out ($${turnCost.toFixed(4)})`);
-
-      // Log any text blocks Claude produced this turn
-      for (const block of response.content) {
-        if (block.type === 'text') {
-          console.log(`  [text] ${block.text.slice(0, 200)}${block.text.length > 200 ? '...' : ''}`);
-        }
+      // Phase 3: Fix — address MUST-FIX items if any
+      let fixResult = '';
+      const mustFixItems = this.parseMustFix(reviewResult);
+      if (mustFixItems) {
+        sendStatus('Fixing review items...');
+        const fixPrompt = [
+          `The user originally requested: "${userMessage}"`,
+          '',
+          'A code review found these must-fix issues:',
+          mustFixItems,
+          '',
+          'Fix each issue listed above.',
+        ].join('\n');
+        fixResult = await this.runAgent(fixPrompt, 'coder');
       }
 
-      if (response.stop_reason === 'end_turn') {
-        const textBlocks = response.content.filter(
-          (b): b is Anthropic.TextBlock => b.type === 'text',
-        );
-        const reply = textBlocks.map((b) => b.text).join('\n') || '(no response)';
-        const totalCost = calcCost(totalIn, totalOut);
-        console.log(`\nFINAL REPLY: ${reply.slice(0, 300)}${reply.length > 300 ? '...' : ''}`);
-        console.log(`TOTAL: ${totalIn} in / ${totalOut} out | ${turn + 1} turns | $${totalCost.toFixed(4)}`);
-        console.log('='.repeat(60));
-        return reply;
+      // Re-stage if fixes were made
+      if (fixResult) {
+        await this.stageAllRepos();
       }
 
-      if (response.stop_reason === 'tool_use') {
-        messages.push({ role: 'assistant', content: response.content });
+      // Phase 4: Commit and push
+      sendStatus('Committing and pushing...');
+      const commitPrompt = [
+        `The user requested: "${userMessage}"`,
+        '',
+        'All changes have been made and reviewed. Commit and push.',
+      ].join('\n');
+      const commitResult = await this.runAgent(commitPrompt, 'committer');
 
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-        for (const block of response.content) {
-          if (block.type !== 'tool_use') continue;
+      // Phase 5: Compose final reply
+      const parts = [`*What was done:*\n${coderResult}`];
 
-          const inputStr = JSON.stringify(block.input);
-          console.log(`  [tool_call] ${block.name}(${inputStr.slice(0, 150)}${inputStr.length > 150 ? '...' : ''})`);
-
-          try {
-            const { content, isError } = await this.executeTool(
-              block.name,
-              block.input as Record<string, unknown>,
-            );
-            console.log(`  [tool_result] ${isError ? 'ERROR: ' : ''}${content.slice(0, 150)}${content.length > 150 ? '...' : ''}`);
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content,
-              is_error: isError,
-            });
-          } catch (err: any) {
-            console.log(`  [tool_error] ${err.message}`);
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: `Tool error: ${err.message}`,
-              is_error: true,
-            });
-          }
-        }
-
-        messages.push({ role: 'user', content: toolResults });
-        continue;
+      if (reviewResult) {
+        parts.push(`*Review findings:*\n${reviewResult}`);
+      }
+      if (fixResult) {
+        parts.push(`*Fixed after review:*\n${fixResult}`);
+      }
+      if (commitResult) {
+        parts.push(commitResult);
       }
 
-      // Unexpected stop reason
-      const textBlocks = response.content.filter(
-        (b): b is Anthropic.TextBlock => b.type === 'text',
-      );
-      return textBlocks.map((b) => b.text).join('\n') || '(unexpected stop)';
+      const finalReply = parts.join('\n\n');
+
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`FINAL REPLY: ${finalReply.slice(0, 500)}${finalReply.length > 500 ? '...' : ''}`);
+      console.log('='.repeat(60));
+
+      return finalReply;
+    } catch (err: any) {
+      console.error('Orchestrator error:', err.message);
+      throw err;
     }
-
-    return 'Max turns reached. The task may be incomplete.';
   }
 }

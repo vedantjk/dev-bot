@@ -7,17 +7,18 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
   },
   "keywords": [],
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.72.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.29",
     "@modelcontextprotocol/sdk": "^1.25.3",
-    "@modelcontextprotocol/server-filesystem": "^2026.1.14",
     "@octokit/rest": "^22.0.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^12.6.2",
+    "dockerode": "^4.0.9",
     "dotenv": "^17.2.3",
     "pino": "^10.3.0",
     "qrcode-terminal": "^0.12.0",
@@ -26,9 +27,11 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/dockerode": "^4.0.1",
     "@types/node": "^25.1.0",
     "@types/qrcode-terminal": "^0.12.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }

@@ -2,10 +2,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import simpleGit from 'simple-git';
-import { existsSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, unlinkSync, appendFileSync } from 'fs';
+import { resolve, join } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import Docker from 'dockerode';
 
 const execFileAsync = promisify(execFile);
 
@@ -94,6 +95,35 @@ server.tool(
   },
 );
 
+// --- git_diff ---
+server.tool(
+  'git_diff',
+  'Show unified diff of changes in a repository. Returns filenames and line numbers.',
+  {
+    repo_name: z.string().describe('Name of the repository'),
+    staged: z.boolean().optional().default(false).describe('If true, show only staged changes'),
+  },
+  async ({ repo_name, staged }) => {
+    const dest = repoPath(repo_name);
+    if (!existsSync(dest)) {
+      return {
+        content: [{ type: 'text', text: `Repository ${repo_name} not found. Clone it first.` }],
+        isError: true,
+      };
+    }
+    const git = simpleGit(dest);
+    const diff = staged ? await git.diff(['--staged']) : await git.diff();
+    if (!diff.trim()) {
+      return {
+        content: [{ type: 'text', text: 'No differences found.' }],
+      };
+    }
+    return {
+      content: [{ type: 'text', text: diff }],
+    };
+  },
+);
+
 // --- git_commit_and_push ---
 server.tool(
   'git_commit_and_push',
@@ -163,22 +193,165 @@ server.tool(
   },
 );
 
+// --- delete_file ---
+server.tool(
+  'delete_file',
+  'Delete a file inside a repository. Only works within the repos/ directory.',
+  { file_path: z.string().describe('Absolute path to the file to delete') },
+  async ({ file_path }) => {
+    const absolute = resolve(file_path);
+    const reposRoot = resolve(REPOS_DIR);
+
+    if (!absolute.startsWith(reposRoot)) {
+      return {
+        content: [{ type: 'text', text: `Refused: path must be inside ${reposRoot}` }],
+        isError: true,
+      };
+    }
+
+    if (!existsSync(absolute)) {
+      return {
+        content: [{ type: 'text', text: `File not found: ${absolute}` }],
+        isError: true,
+      };
+    }
+
+    unlinkSync(absolute);
+    return {
+      content: [{ type: 'text', text: `Deleted: ${absolute}` }],
+    };
+  },
+);
+
 // --- send_status ---
+// The orchestrator intercepts this tool call from the assistant message stream
+// and forwards the message to WhatsApp. This handler is a simple acknowledgement.
 server.tool(
   'send_status',
   'Send a progress/status message to the user on WhatsApp',
   { message: z.string().describe('Status message to send to the user') },
   async ({ message }) => {
-    if (typeof process.send === 'function') {
-      process.send({ type: 'whatsapp', message });
+    return {
+      content: [{ type: 'text', text: `Status sent: "${message}"` }],
+    };
+  },
+);
+
+// --- write_steering_file ---
+const GLOBAL_DIR = process.env.GLOBAL_DIR ?? './global';
+
+server.tool(
+  'write_steering_file',
+  'Append a best-practice entry to a global steering markdown file (e.g. REVIEW_STANDARDS.md). Append-only.',
+  {
+    filename: z.string().describe('Markdown filename (e.g. REVIEW_STANDARDS.md). No path separators allowed.'),
+    content: z.string().describe('Content to append to the file'),
+  },
+  async ({ filename, content }) => {
+    if (!filename.endsWith('.md')) {
       return {
-        content: [{ type: 'text', text: `Status sent: "${message}"` }],
+        content: [{ type: 'text', text: 'Refused: filename must end with .md' }],
+        isError: true,
       };
     }
+    if (filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+      return {
+        content: [{ type: 'text', text: 'Refused: filename must not contain path separators or traversal' }],
+        isError: true,
+      };
+    }
+    const filePath = resolve(GLOBAL_DIR, filename);
+    appendFileSync(filePath, '\n' + content.trim() + '\n', 'utf-8');
     return {
-      content: [{ type: 'text', text: 'IPC not available — running without parent process.' }],
-      isError: true,
+      content: [{ type: 'text', text: `Appended to ${filename}` }],
     };
+  },
+);
+
+// --- docker_build ---
+const docker = new Docker();
+
+server.tool(
+  'docker_build',
+  'Build a Docker image from a Dockerfile in the repo root. Returns build output.',
+  {
+    repo_name: z.string().describe('Name of the repository in repos/'),
+    timeout: z.number().optional().default(120).describe('Max seconds before killing the build (default 120)'),
+  },
+  async ({ repo_name, timeout }) => {
+    const dest = repoPath(repo_name);
+    if (!existsSync(dest)) {
+      return {
+        content: [{ type: 'text', text: `Repository ${repo_name} not found. Clone it first.` }],
+        isError: true,
+      };
+    }
+
+    const dockerfilePath = join(dest, 'Dockerfile');
+    if (!existsSync(dockerfilePath)) {
+      return {
+        content: [{ type: 'text', text: `No Dockerfile found in ${repo_name}. Create a Dockerfile first.` }],
+        isError: true,
+      };
+    }
+
+    const outputLines: string[] = [];
+
+    try {
+      const stream = await docker.buildImage(
+        { context: dest, src: ['.'] },
+        { rm: true },
+      );
+
+      const buildPromise = new Promise<void>((resolveP, rejectP) => {
+        docker.modem.followProgress(
+          stream,
+          (err: Error | null) => {
+            if (err) {
+              rejectP(err);
+            } else {
+              resolveP();
+            }
+          },
+          (event: any) => {
+            if (event.stream) {
+              outputLines.push(event.stream.replace(/\n$/, ''));
+            }
+            if (event.error) {
+              outputLines.push(event.error);
+            }
+          },
+        );
+      });
+
+      const timeoutPromise = new Promise<never>((_, rejectP) => {
+        setTimeout(() => {
+          (stream as any).destroy?.();
+          rejectP(new Error('Build timed out'));
+        }, timeout * 1000);
+      });
+
+      await Promise.race([buildPromise, timeoutPromise]);
+
+      const tail = outputLines.slice(-50).join('\n');
+      return {
+        content: [{ type: 'text', text: `Build succeeded.\n\n${tail}` }],
+      };
+    } catch (err: any) {
+      if (err.message === 'Build timed out') {
+        return {
+          content: [{ type: 'text', text: `Build timed out after ${timeout}s.` }],
+          isError: true,
+        };
+      }
+      const tail = outputLines.length > 0
+        ? outputLines.slice(-50).join('\n')
+        : err.message;
+      return {
+        content: [{ type: 'text', text: `Build failed.\n\n${tail}` }],
+        isError: true,
+      };
+    }
   },
 );
 

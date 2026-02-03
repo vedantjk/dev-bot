@@ -27,8 +27,9 @@ orchestrator.ts (Claude API agentic tool-use loop)
     │     └── read_file, write_file, edit_file, list_directory, etc.
     │
     └── MCP: dev-bot-server (custom)
-          └── git_clone, git_pull, git_commit_and_push, git_status,
-              create_github_repo, send_status
+          └── git_clone, git_pull, git_diff, git_commit_and_push, git_status,
+              create_github_repo, delete_file, write_steering_file,
+              docker_build, send_status
     │
     ▼
 WhatsApp Reply (final message + commit URL)
@@ -47,13 +48,14 @@ dev-bot/
 │   │   └── client.ts            # Baileys client setup, QR auth, message listener
 │   ├── ai/
 │   │   ├── orchestrator.ts      # MCP client setup + Claude agentic loop
-│   │   └── system-prompt.ts     # Reads global/*.md, builds system prompt
+│   │   └── system-prompt.ts     # Per-agent system prompts (coder, reviewer, committer)
 │   └── mcp/
-│       └── dev-bot-server.ts    # Custom MCP server (git, github, send_status tools)
+│       └── dev-bot-server.ts    # Custom MCP server (git, github, docker, steering tools)
 ├── global/
 │   ├── STEERING.md              # Global dev preferences
 │   ├── CODING_STYLE.md          # Code conventions
-│   └── FRAMEWORKS.md            # Preferred tech stack
+│   ├── FRAMEWORKS.md            # Preferred tech stack
+│   └── REVIEW_STANDARDS.md     # Auto-appended best practices from reviews
 ├── repos/                       # Cloned GitHub repositories go here
 ├── auth_info/                   # Baileys WhatsApp session (auto-created)
 ├── package.json
@@ -74,15 +76,19 @@ dev-bot/
 - Agent uses paths like `repos/my-project/src/index.ts`
 
 ### 2. Custom: Dev Bot Server (`src/mcp/dev-bot-server.ts`)
-Built with `@modelcontextprotocol/sdk/server` + `simple-git` + `@octokit/rest`.
+Built with `@modelcontextprotocol/sdk/server` + `simple-git` + `@octokit/rest` + `dockerode`.
 
 | Tool | Purpose |
 |------|---------|
 | `git_clone` | Clone a repo to `./repos/{name}` |
 | `git_pull` | Pull latest changes |
+| `git_diff` | Show unified diff (optional `staged` flag) |
 | `git_commit_and_push` | Stage all, commit, push, return commit URL |
 | `git_status` | Show working tree status |
 | `create_github_repo` | Create a new repo on GitHub via Octokit |
+| `delete_file` | Delete a file inside `repos/` (sandboxed) |
+| `write_steering_file` | Append best-practice entries to `global/*.md` (append-only) |
+| `docker_build` | Build a Docker image from repo Dockerfile (with timeout) |
 | `send_status` | Send progress message to WhatsApp (intercepted by orchestrator) |
 
 ---
@@ -128,6 +134,7 @@ Built with `@modelcontextprotocol/sdk/server` + `simple-git` + `@octokit/rest`.
 | `pino` | Logger (required by Baileys) |
 | `dotenv` | Load .env file |
 | `zod` | Schema validation for config + MCP tool schemas |
+| `dockerode` | Docker Engine API client for build verification |
 
 ### Dev
 | Package | Purpose |
@@ -184,8 +191,9 @@ DAILY_BUDGET_USD=5.00
 - [ ] Prompt caching for system prompt + project context
 - [ ] Branch support (feature branches instead of main)
 - [ ] Conversation memory (follow-up messages refine same task)
+- [ ] **Vector-based knowledge base with semantic search** — replace the current `global/*.md` file-injection approach in `system-prompt.ts` with a proper vector KB. Current approach reads all markdown files and injects them verbatim into the system prompt, which doesn't scale and wastes tokens on irrelevant context. A vector KB would: (1) embed project docs, coding standards, and past review learnings into a vector store, (2) retrieve only the chunks relevant to the current task via semantic search, (3) reduce system prompt size and improve context relevance. Consider using an embedding model + local vector store (e.g. sqlite-vec, chromadb) or a hosted solution.
 
 ## Future Enhancements
 
-- [ ] Docker MCP server for isolated build/test environments
+- [x] ~~Docker MCP server for isolated build/test environments~~ — implemented as `docker_build` tool via `dockerode`
 - [ ] Budget alerts at 80% of daily limit
