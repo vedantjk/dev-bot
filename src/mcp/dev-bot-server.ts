@@ -2,17 +2,35 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import simpleGit from 'simple-git';
-import { existsSync, unlinkSync, appendFileSync } from 'fs';
+import { existsSync, unlinkSync, appendFileSync, writeFileSync, mkdirSync } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Docker from 'dockerode';
+import pino from 'pino';
 
 const execFileAsync = promisify(execFile);
 
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME ?? '';
 const REPOS_DIR = process.env.REPOS_DIR ?? './repos';
 const DEV_BOT_ROOT = process.env.DEV_BOT_ROOT ?? resolve('.');
+
+// Set up logging for MCP server
+const LOGS_DIR = resolve(DEV_BOT_ROOT, 'logs');
+// Ensure logs directory exists
+if (!existsSync(LOGS_DIR)) {
+  mkdirSync(LOGS_DIR, { recursive: true });
+}
+const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('.')[0];
+const logFile = join(LOGS_DIR, `mcp-server-${timestamp}.log`);
+
+const mcpLogger = pino({
+  level: 'info',
+  timestamp: pino.stdTimeFunctions.isoTime,
+}, pino.destination({
+  dest: logFile,
+  sync: false,
+}));
 
 function repoPath(repoName: string): string {
   // Allow "." or "dev-bot" to reference the dev-bot repo itself
@@ -27,6 +45,17 @@ async function gh(args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/** Helper to log tool calls */
+function logToolCall(toolName: string, input: any, result?: any, error?: any) {
+  mcpLogger.info({
+    tool: toolName,
+    input,
+    result: result ? JSON.stringify(result).slice(0, 500) : undefined,
+    error: error ? error.message : undefined,
+    success: !error,
+  }, `Tool: ${toolName}`);
+}
+
 const server = new McpServer({
   name: 'dev-bot-server',
   version: '1.0.0',
@@ -38,16 +67,21 @@ server.tool(
   'Clone a GitHub repo to the local repos directory',
   { repo_name: z.string().describe('Name of the GitHub repository to clone') },
   async ({ repo_name }) => {
-    const dest = repoPath(repo_name);
-    if (existsSync(dest)) {
-      return {
-        content: [{ type: 'text', text: `Repository already exists at ${dest}. Use git_pull to update.` }],
-      };
+    try {
+      const dest = repoPath(repo_name);
+      if (existsSync(dest)) {
+        const result = { content: [{ type: 'text', text: `Repository already exists at ${dest}. Use git_pull to update.` }] };
+        logToolCall('git_clone', { repo_name }, result);
+        return result;
+      }
+      const out = await gh(['repo', 'clone', `${GITHUB_USERNAME}/${repo_name}`, dest]);
+      const result = { content: [{ type: 'text', text: `Cloned ${repo_name} to ${dest}${out ? '\n' + out : ''}` }] };
+      logToolCall('git_clone', { repo_name }, result);
+      return result;
+    } catch (err: any) {
+      logToolCall('git_clone', { repo_name }, undefined, err);
+      throw err;
     }
-    const out = await gh(['repo', 'clone', `${GITHUB_USERNAME}/${repo_name}`, dest]);
-    return {
-      content: [{ type: 'text', text: `Cloned ${repo_name} to ${dest}${out ? '\n' + out : ''}` }],
-    };
   },
 );
 
@@ -138,30 +172,37 @@ server.tool(
     commit_message: z.string().describe('Commit message (use conventional commits format)'),
   },
   async ({ repo_name, commit_message }) => {
-    const dest = repoPath(repo_name);
-    if (!existsSync(dest)) {
-      return {
-        content: [{ type: 'text', text: `Repository ${repo_name} not found.` }],
-        isError: true,
-      };
+    try {
+      const dest = repoPath(repo_name);
+      if (!existsSync(dest)) {
+        const result = {
+          content: [{ type: 'text', text: `Repository ${repo_name} not found.` }],
+          isError: true,
+        };
+        logToolCall('git_commit_and_push', { repo_name, commit_message }, result);
+        return result;
+      }
+      const git = simpleGit(dest);
+
+      await git.add('-A');
+      const commitResult = await git.commit(commit_message);
+
+      if (!commitResult.commit) {
+        const result = { content: [{ type: 'text', text: 'Nothing to commit — working tree clean.' }] };
+        logToolCall('git_commit_and_push', { repo_name, commit_message }, result);
+        return result;
+      }
+
+      await git.push();
+      const sha = commitResult.commit;
+      const commitUrl = `https://github.com/${GITHUB_USERNAME}/${repo_name}/commit/${sha}`;
+      const result = { content: [{ type: 'text', text: `Committed and pushed: ${commitUrl}` }] };
+      logToolCall('git_commit_and_push', { repo_name, commit_message, sha }, result);
+      return result;
+    } catch (err: any) {
+      logToolCall('git_commit_and_push', { repo_name, commit_message }, undefined, err);
+      throw err;
     }
-    const git = simpleGit(dest);
-
-    await git.add('-A');
-    const commitResult = await git.commit(commit_message);
-
-    if (!commitResult.commit) {
-      return {
-        content: [{ type: 'text', text: 'Nothing to commit — working tree clean.' }],
-      };
-    }
-
-    await git.push();
-    const sha = commitResult.commit;
-    const commitUrl = `https://github.com/${GITHUB_USERNAME}/${repo_name}/commit/${sha}`;
-    return {
-      content: [{ type: 'text', text: `Committed and pushed: ${commitUrl}` }],
-    };
   },
 );
 
@@ -276,6 +317,8 @@ server.tool(
 
 // --- docker_build ---
 const docker = new Docker();
+
+mcpLogger.info('MCP server initialized');
 
 /** Best-effort removal of a Docker image by tag or ID. */
 async function removeImage(ref: string): Promise<void> {

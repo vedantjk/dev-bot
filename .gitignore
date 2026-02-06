@@ -4,3 +4,4 @@ dist/
 repos/
 auth_info/
 *.db
+logs/

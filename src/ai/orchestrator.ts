@@ -4,6 +4,7 @@ import { readdirSync } from 'fs';
 import simpleGit from 'simple-git';
 import { config } from '../config.js';
 import { buildCoderPrompt, buildReviewerPrompt, buildCommitterPrompt } from './system-prompt.js';
+import { RequestLogger } from '../logger.js';
 
 interface OrchestratorOptions {
   onStatusMessage?: (message: string) => void;
@@ -101,11 +102,12 @@ export class Orchestrator {
   }
 
   /** Run a single agent as an independent query() call. */
-  private async runAgent(prompt: string, agent: AgentType): Promise<string> {
+  private async runAgent(prompt: string, agent: AgentType, requestLogger: RequestLogger): Promise<string> {
     const cfg = AGENT_CONFIGS[agent];
     let finalResult = '(no response)';
 
     console.log(`\n--- ${agent.toUpperCase()} AGENT ---`);
+    requestLogger.agentStart(agent, prompt);
 
     for await (const message of query({
       prompt,
@@ -146,10 +148,12 @@ export class Orchestrator {
         for (const block of message.message.content) {
           if (typeof block === 'object' && 'text' in block && typeof block.text === 'string') {
             console.log(`  [text] ${block.text.slice(0, 200)}${block.text.length > 200 ? '...' : ''}`);
+            requestLogger.agentThinking(agent, block.text);
           }
           if (typeof block === 'object' && 'name' in block) {
             const input = JSON.stringify((block as any).input ?? {});
             console.log(`  [tool] ${(block as any).name}(${input.slice(0, 150)}${input.length > 150 ? '...' : ''})`);
+            requestLogger.toolUsage(agent, (block as any).name, (block as any).input);
           }
         }
       }
@@ -157,8 +161,14 @@ export class Orchestrator {
       if (message.type === 'result') {
         if (message.subtype === 'success') {
           finalResult = message.result || '(no response)';
+          requestLogger.agentComplete(agent, finalResult, {
+            cost: message.total_cost_usd,
+            turns: message.num_turns,
+            duration: message.duration_ms,
+          });
         } else {
           finalResult = `Error: ${message.errors.join('; ')}`;
+          requestLogger.agentError(agent, new Error(finalResult));
         }
         console.log(`  [result] ${message.subtype} — $${message.total_cost_usd.toFixed(4)} | ${message.num_turns} turns | ${message.duration_ms}ms`);
       }
@@ -168,7 +178,7 @@ export class Orchestrator {
   }
 
   /** Stage all changes in every repo so git diff --staged shows the full picture. */
-  private async stageAllRepos(): Promise<void> {
+  private async stageAllRepos(requestLogger: RequestLogger): Promise<void> {
     const reposDir = resolve('./repos');
     try {
       const entries = readdirSync(reposDir, { withFileTypes: true });
@@ -185,6 +195,11 @@ export class Orchestrator {
         if (hasChanges) {
           await git.add('-A');
           console.log(`  [staged] ${entry.name}`);
+          requestLogger.gitOperation('stage', entry.name, {
+            modified: status.modified.length,
+            created: status.created.length,
+            deleted: status.deleted.length,
+          });
         }
       }
     } catch {
@@ -202,22 +217,27 @@ export class Orchestrator {
   }
 
   async handleRequest(userMessage: string): Promise<string> {
+    // Create a request logger with unique ID
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+    const requestLogger = new RequestLogger(requestId);
+
     console.log(`\n${'='.repeat(60)}`);
     console.log(`REQUEST: ${userMessage}`);
     console.log('='.repeat(60));
 
     const sendStatus = (msg: string) => {
       console.log(`[status] ${msg}`);
+      requestLogger.statusMessage(msg);
       this.onStatusMessage?.(msg);
     };
 
     try {
       // Phase 1: Coder — set up repo and implement changes
       sendStatus('Coding in progress...');
-      const coderResult = await this.runAgent(userMessage, 'coder');
+      const coderResult = await this.runAgent(userMessage, 'coder', requestLogger);
 
       // Stage all changes so the reviewer sees new files via git diff --staged
-      await this.stageAllRepos();
+      await this.stageAllRepos(requestLogger);
 
       // Phase 2: Reviewer — review the diff
       sendStatus('Reviewing changes...');
@@ -229,7 +249,7 @@ export class Orchestrator {
         '',
         'Review the changes made in the repository. Use git_diff with staged=true to see all changes including new files.',
       ].join('\n');
-      const reviewResult = await this.runAgent(reviewerPrompt, 'reviewer');
+      const reviewResult = await this.runAgent(reviewerPrompt, 'reviewer', requestLogger);
 
       // Phase 3: Fix — address MUST-FIX items if any
       let fixResult = '';
@@ -244,12 +264,12 @@ export class Orchestrator {
           '',
           'Fix each issue listed above.',
         ].join('\n');
-        fixResult = await this.runAgent(fixPrompt, 'coder');
+        fixResult = await this.runAgent(fixPrompt, 'coder', requestLogger);
       }
 
       // Re-stage if fixes were made
       if (fixResult) {
-        await this.stageAllRepos();
+        await this.stageAllRepos(requestLogger);
       }
 
       // Phase 4: Commit and push
@@ -259,7 +279,7 @@ export class Orchestrator {
         '',
         'All changes have been made and reviewed. Commit and push.',
       ].join('\n');
-      const commitResult = await this.runAgent(commitPrompt, 'committer');
+      const commitResult = await this.runAgent(commitPrompt, 'committer', requestLogger);
 
       // Phase 5: Compose final reply
       const parts = [`*What was done:*\n${coderResult}`];
@@ -280,9 +300,11 @@ export class Orchestrator {
       console.log(`FINAL REPLY: ${finalReply.slice(0, 500)}${finalReply.length > 500 ? '...' : ''}`);
       console.log('='.repeat(60));
 
+      requestLogger.response(finalReply);
       return finalReply;
     } catch (err: any) {
       console.error('Orchestrator error:', err.message);
+      requestLogger.error(err);
       throw err;
     }
   }
