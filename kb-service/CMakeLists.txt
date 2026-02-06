@@ -34,6 +34,9 @@ if(BUILD_TESTS)
       GIT_REPOSITORY https://github.com/google/googletest.git
       GIT_TAG v1.14.0
     )
+    # Set options before making available
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
   endif()
   enable_testing()
@@ -58,6 +61,8 @@ target_link_libraries(kb-service PRIVATE
   OpenSSL::SSL
   OpenSSL::Crypto
   pthread
+  openblas
+  lapack
 )
 
 # Link nlohmann_json if found as package
@@ -91,13 +96,15 @@ if(BUILD_TESTS)
   )
 
   target_link_libraries(kb-service-tests PRIVATE
+    GTest::gtest
+    GTest::gtest_main
     ${ROCKSDB_LIB}
     ${FAISS_LIB}
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
-    GTest::gtest
-    GTest::gtest_main
+    openblas
+    lapack
   )
 
   if(nlohmann_json_FOUND)
@@ -130,6 +137,8 @@ if(BUILD_TESTS)
     OpenSSL::SSL
     OpenSSL::Crypto
     pthread
+    openblas
+    lapack
   )
 
   if(nlohmann_json_FOUND)

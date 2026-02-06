@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
   libssl-dev \
   librocksdb-dev \
   wget \
+  && ldconfig \
   && rm -rf /var/lib/apt/lists/*
 
 # Install FAISS
@@ -27,6 +28,7 @@ RUN git clone https://github.com/facebookresearch/faiss.git && \
   cmake -B build -DFAISS_ENABLE_GPU=OFF -DFAISS_ENABLE_PYTHON=OFF -DBUILD_TESTING=OFF . && \
   make -C build -j$(nproc) && \
   make -C build install && \
+  ldconfig && \
   cd .. && rm -rf faiss
 
 # Install nlohmann_json
@@ -44,8 +46,13 @@ RUN mkdir -p build && \
   cmake .. -DBUILD_TESTS=ON && \
   make -j$(nproc)
 
-# Run tests to verify build
-RUN cd build && ./kb-service-tests && ./kb-integration-test
+# Run tests to verify build (with verbose output)
+RUN cd build && \
+  echo "Running unit tests..." && \
+  ./kb-service-tests --gtest_color=yes || (echo "Unit tests failed!" && exit 1) && \
+  echo "Running integration tests..." && \
+  ./kb-integration-test || (echo "Integration tests failed!" && exit 1) && \
+  echo "All tests passed successfully!"
 
 # Create data directory
 RUN mkdir -p /data
