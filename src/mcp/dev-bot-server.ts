@@ -70,12 +70,12 @@ server.tool(
     try {
       const dest = repoPath(repo_name);
       if (existsSync(dest)) {
-        const result = { content: [{ type: 'text', text: `Repository already exists at ${dest}. Use git_pull to update.` }] };
+        const result = { content: [{ type: 'text' as const, text: `Repository already exists at ${dest}. Use git_pull to update.` }] };
         logToolCall('git_clone', { repo_name }, result);
         return result;
       }
       const out = await gh(['repo', 'clone', `${GITHUB_USERNAME}/${repo_name}`, dest]);
-      const result = { content: [{ type: 'text', text: `Cloned ${repo_name} to ${dest}${out ? '\n' + out : ''}` }] };
+      const result = { content: [{ type: 'text' as const, text: `Cloned ${repo_name} to ${dest}${out ? '\n' + out : ''}` }] };
       logToolCall('git_clone', { repo_name }, result);
       return result;
     } catch (err: any) {
@@ -176,7 +176,7 @@ server.tool(
       const dest = repoPath(repo_name);
       if (!existsSync(dest)) {
         const result = {
-          content: [{ type: 'text', text: `Repository ${repo_name} not found.` }],
+          content: [{ type: 'text' as const, text: `Repository ${repo_name} not found.` }],
           isError: true,
         };
         logToolCall('git_commit_and_push', { repo_name, commit_message }, result);
@@ -188,7 +188,7 @@ server.tool(
       const commitResult = await git.commit(commit_message);
 
       if (!commitResult.commit) {
-        const result = { content: [{ type: 'text', text: 'Nothing to commit — working tree clean.' }] };
+        const result = { content: [{ type: 'text' as const, text: 'Nothing to commit — working tree clean.' }] };
         logToolCall('git_commit_and_push', { repo_name, commit_message }, result);
         return result;
       }
@@ -196,7 +196,7 @@ server.tool(
       await git.push();
       const sha = commitResult.commit;
       const commitUrl = `https://github.com/${GITHUB_USERNAME}/${repo_name}/commit/${sha}`;
-      const result = { content: [{ type: 'text', text: `Committed and pushed: ${commitUrl}` }] };
+      const result = { content: [{ type: 'text' as const, text: `Committed and pushed: ${commitUrl}` }] };
       logToolCall('git_commit_and_push', { repo_name, commit_message, sha }, result);
       return result;
     } catch (err: any) {
