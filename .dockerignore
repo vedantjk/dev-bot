@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env
+*.log
+*.md
+!kb-service/**
+src
+test
+tests
+.github
+.vscode
