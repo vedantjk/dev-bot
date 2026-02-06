@@ -62,6 +62,7 @@ beforeAll(async () => {
       GLOBAL_DIR: TEST_GLOBAL,
       GITHUB_USERNAME: 'test-user',
       GITHUB_TOKEN: '',
+      DEV_BOT_ROOT: resolve('.'),
     },
     cwd: resolve('.'),
   });
@@ -186,6 +187,24 @@ describe('git_status', () => {
 
     // Restore
     writeFileSync(join(TEST_REPO_PATH, 'hello.txt'), 'hello world\n', 'utf-8');
+  });
+
+  it('allows accessing dev-bot repo with "." keyword', async () => {
+    const result = await client.callTool({
+      name: 'git_status',
+      arguments: { repo_name: '.' },
+    });
+    const text = (result.content as any)[0].text;
+    expect(text).toContain('Branch:');
+  });
+
+  it('allows accessing dev-bot repo with "dev-bot" keyword', async () => {
+    const result = await client.callTool({
+      name: 'git_status',
+      arguments: { repo_name: 'dev-bot' },
+    });
+    const text = (result.content as any)[0].text;
+    expect(text).toContain('Branch:');
   });
 });
 

@@ -12,8 +12,13 @@ const execFileAsync = promisify(execFile);
 
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME ?? '';
 const REPOS_DIR = process.env.REPOS_DIR ?? './repos';
+const DEV_BOT_ROOT = process.env.DEV_BOT_ROOT ?? resolve('.');
 
 function repoPath(repoName: string): string {
+  // Allow "." or "dev-bot" to reference the dev-bot repo itself
+  if (repoName === '.' || repoName === 'dev-bot') {
+    return resolve(DEV_BOT_ROOT);
+  }
   return resolve(REPOS_DIR, repoName);
 }
 
@@ -50,7 +55,7 @@ server.tool(
 server.tool(
   'git_pull',
   'Pull latest changes for a repository',
-  { repo_name: z.string().describe('Name of the repository to pull') },
+  { repo_name: z.string().describe('Name of the repository to pull. Use "." or "dev-bot" for the dev-bot repo itself.') },
   async ({ repo_name }) => {
     const dest = repoPath(repo_name);
     if (!existsSync(dest)) {
@@ -71,7 +76,7 @@ server.tool(
 server.tool(
   'git_status',
   'Show the working tree status of a repository',
-  { repo_name: z.string().describe('Name of the repository') },
+  { repo_name: z.string().describe('Name of the repository. Use "." or "dev-bot" for the dev-bot repo itself.') },
   async ({ repo_name }) => {
     const dest = repoPath(repo_name);
     if (!existsSync(dest)) {
@@ -100,7 +105,7 @@ server.tool(
   'git_diff',
   'Show unified diff of changes in a repository. Returns filenames and line numbers.',
   {
-    repo_name: z.string().describe('Name of the repository'),
+    repo_name: z.string().describe('Name of the repository. Use "." or "dev-bot" for the dev-bot repo itself.'),
     staged: z.boolean().optional().default(false).describe('If true, show only staged changes'),
   },
   async ({ repo_name, staged }) => {
@@ -129,7 +134,7 @@ server.tool(
   'git_commit_and_push',
   'Stage all changes, commit, and push to remote. Returns the commit URL.',
   {
-    repo_name: z.string().describe('Name of the repository'),
+    repo_name: z.string().describe('Name of the repository. Use "." or "dev-bot" for the dev-bot repo itself.'),
     commit_message: z.string().describe('Commit message (use conventional commits format)'),
   },
   async ({ repo_name, commit_message }) => {
@@ -275,7 +280,7 @@ server.tool(
   'docker_build',
   'Build a Docker image from a Dockerfile in the repo root. Returns build output.',
   {
-    repo_name: z.string().describe('Name of the repository in repos/'),
+    repo_name: z.string().describe('Name of the repository in repos/. Use "." or "dev-bot" for the dev-bot repo itself.'),
     timeout: z.number().optional().default(120).describe('Max seconds before killing the build (default 120)'),
   },
   async ({ repo_name, timeout }) => {

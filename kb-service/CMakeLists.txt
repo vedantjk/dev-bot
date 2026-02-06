@@ -23,6 +23,22 @@ endif()
 # OpenSSL for hashing
 find_package(OpenSSL REQUIRED)
 
+# Google Test for unit tests
+option(BUILD_TESTS "Build unit tests" ON)
+if(BUILD_TESTS)
+  find_package(GTest QUIET)
+  if(NOT GTest_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG v1.14.0
+    )
+    FetchContent_MakeAvailable(googletest)
+  endif()
+  enable_testing()
+endif()
+
 # Add executable
 add_executable(kb-service
   src/main.cpp
@@ -61,3 +77,68 @@ target_compile_options(kb-service PRIVATE
 install(TARGETS kb-service
   RUNTIME DESTINATION bin
 )
+
+# Build tests
+if(BUILD_TESTS)
+  add_executable(kb-service-tests
+    test/knowledge_base_test.cpp
+    src/knowledge_base.cpp
+    src/embedding_service.cpp
+  )
+
+  target_include_directories(kb-service-tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(kb-service-tests PRIVATE
+    ${ROCKSDB_LIB}
+    ${FAISS_LIB}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    GTest::gtest
+    GTest::gtest_main
+  )
+
+  if(nlohmann_json_FOUND)
+    target_link_libraries(kb-service-tests PRIVATE nlohmann_json::nlohmann_json)
+  endif()
+
+  target_compile_options(kb-service-tests PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+  )
+
+  include(GoogleTest)
+  gtest_discover_tests(kb-service-tests)
+
+  # Integration test (standalone executable)
+  add_executable(kb-integration-test
+    test/integration_test.cpp
+    src/knowledge_base.cpp
+    src/embedding_service.cpp
+  )
+
+  target_include_directories(kb-integration-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  target_link_libraries(kb-integration-test PRIVATE
+    ${ROCKSDB_LIB}
+    ${FAISS_LIB}
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+  )
+
+  if(nlohmann_json_FOUND)
+    target_link_libraries(kb-integration-test PRIVATE nlohmann_json::nlohmann_json)
+  endif()
+
+  target_compile_options(kb-integration-test PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+  )
+endif()

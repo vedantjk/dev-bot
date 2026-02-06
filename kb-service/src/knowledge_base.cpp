@@ -189,7 +189,11 @@ bool KnowledgeBase::update(const std::string& id, const std::string& content, co
     ).count();
 
     std::string serialized = doc.dump();
-    db_->Put(rocksdb::WriteOptions(), id, serialized);
+    rocksdb::Status put_status = db_->Put(rocksdb::WriteOptions(), id, serialized);
+
+    if (!put_status.ok()) {
+      return false;
+    }
 
     // Rebuild FAISS index
     index_->reset();

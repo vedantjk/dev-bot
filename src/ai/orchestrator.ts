@@ -129,6 +129,7 @@ export class Orchestrator {
               GITHUB_TOKEN: config.GITHUB_TOKEN,
               REPOS_DIR: resolve('./repos'),
               GLOBAL_DIR: resolve('./global'),
+              DEV_BOT_ROOT: resolve('.'),
             },
           },
         },
