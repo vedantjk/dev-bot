@@ -209,6 +209,14 @@ bool KnowledgeBase::update(const std::string& id, const std::string& content, co
 bool KnowledgeBase::remove(const std::string& id) {
   std::lock_guard<std::mutex> lock(index_mutex_);
 
+  // Check if the key exists first
+  std::string value;
+  rocksdb::Status get_status = db_->Get(rocksdb::ReadOptions(), id, &value);
+
+  if (!get_status.ok()) {
+    return false;
+  }
+
   rocksdb::Status status = db_->Delete(rocksdb::WriteOptions(), id);
 
   if (status.ok()) {

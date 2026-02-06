@@ -7,7 +7,6 @@ FROM ubuntu:22.04
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
   build-essential \
-  cmake \
   git \
   pkg-config \
   libssl-dev \
@@ -15,6 +14,12 @@ RUN apt-get update && apt-get install -y \
   wget \
   && ldconfig \
   && rm -rf /var/lib/apt/lists/*
+
+# Install newer CMake (FAISS requires >= 3.24.0)
+RUN wget https://github.com/Kitware/CMake/releases/download/v3.27.7/cmake-3.27.7-linux-x86_64.sh -O /tmp/cmake-install.sh && \
+  chmod +x /tmp/cmake-install.sh && \
+  /tmp/cmake-install.sh --skip-license --prefix=/usr/local && \
+  rm /tmp/cmake-install.sh
 
 # Install FAISS
 RUN apt-get update && apt-get install -y \
@@ -41,7 +46,8 @@ WORKDIR /app
 COPY . .
 
 # Build the application with tests
-RUN mkdir -p build && \
+RUN rm -rf build && \
+  mkdir -p build && \
   cd build && \
   cmake .. -DBUILD_TESTS=ON && \
   make -j$(nproc)

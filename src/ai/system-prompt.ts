@@ -54,7 +54,7 @@ You are NOT done until you complete these steps. No exceptions, even for small c
    - Keep it minimal — just enough to verify the project builds and dependencies resolve.
    - If the repo already has a Dockerfile, update it if needed rather than replacing it blindly.
 
-2. **Run mcp__dev-bot__docker_build** to verify the project builds successfully.
+2. **Run mcp__dev-bot__docker_build** with the \`dockerfile\` path (e.g. \`repos/myproject/Dockerfile\`) to verify the project builds successfully.
    - If the build fails, read the error output, fix the issue, and rebuild.
    - Repeat until the build passes.
 

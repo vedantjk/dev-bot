@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import simpleGit from 'simple-git';
 import { existsSync, unlinkSync, appendFileSync } from 'fs';
-import { resolve, join } from 'path';
+import { resolve, join, dirname, basename } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Docker from 'dockerode';
@@ -201,15 +201,16 @@ server.tool(
 // --- delete_file ---
 server.tool(
   'delete_file',
-  'Delete a file inside a repository. Only works within the repos/ directory.',
+  'Delete a file inside a known repository directory (repos/ or dev-bot root).',
   { file_path: z.string().describe('Absolute path to the file to delete') },
   async ({ file_path }) => {
     const absolute = resolve(file_path);
     const reposRoot = resolve(REPOS_DIR);
+    const devBotRoot = resolve(DEV_BOT_ROOT);
 
-    if (!absolute.startsWith(reposRoot)) {
+    if (!absolute.startsWith(reposRoot) && !absolute.startsWith(devBotRoot)) {
       return {
-        content: [{ type: 'text', text: `Refused: path must be inside ${reposRoot}` }],
+        content: [{ type: 'text', text: `Refused: path must be inside ${reposRoot} or ${devBotRoot}` }],
         isError: true,
       };
     }
@@ -276,36 +277,45 @@ server.tool(
 // --- docker_build ---
 const docker = new Docker();
 
+/** Best-effort removal of a Docker image by tag or ID. */
+async function removeImage(ref: string): Promise<void> {
+  try {
+    await docker.getImage(ref).remove({ force: true });
+  } catch {
+    // Ignore — image may already be gone or never fully built.
+  }
+}
+
 server.tool(
   'docker_build',
-  'Build a Docker image from a Dockerfile in the repo root. Returns build output.',
+  'Build a Docker image from a Dockerfile path. The build context is the Dockerfile\'s parent directory. The image is removed after verification.',
   {
-    repo_name: z.string().describe('Name of the repository in repos/. Use "." or "dev-bot" for the dev-bot repo itself.'),
+    dockerfile: z.string().describe('Path to the Dockerfile, relative to the project root (e.g. repos/myproject/Dockerfile)'),
+    tag: z.string().optional().describe('Image tag (default: auto-generated devbot-<dir>-<timestamp>)'),
     timeout: z.number().optional().default(120).describe('Max seconds before killing the build (default 120)'),
   },
-  async ({ repo_name, timeout }) => {
-    const dest = repoPath(repo_name);
-    if (!existsSync(dest)) {
+  async ({ dockerfile, tag, timeout }) => {
+    const resolvedDockerfile = resolve(DEV_BOT_ROOT, dockerfile);
+    if (!existsSync(resolvedDockerfile)) {
       return {
-        content: [{ type: 'text', text: `Repository ${repo_name} not found. Clone it first.` }],
+        content: [{ type: 'text', text: `Dockerfile not found: ${resolvedDockerfile}` }],
         isError: true,
       };
     }
 
-    const dockerfilePath = join(dest, 'Dockerfile');
-    if (!existsSync(dockerfilePath)) {
-      return {
-        content: [{ type: 'text', text: `No Dockerfile found in ${repo_name}. Create a Dockerfile first.` }],
-        isError: true,
-      };
-    }
+    const contextDir = dirname(resolvedDockerfile);
+    const dockerfileName = basename(resolvedDockerfile);
+    const imageTag = tag ?? `devbot-${basename(contextDir)}-${Date.now()}`;
 
     const outputLines: string[] = [];
+    let builtImageId: string | undefined;
+    let buildErrorSeen = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     try {
       const stream = await docker.buildImage(
-        { context: dest, src: ['.'] },
-        { rm: true },
+        { context: contextDir, src: ['.'] },
+        { rm: true, t: imageTag, dockerfile: dockerfileName },
       );
 
       const buildPromise = new Promise<void>((resolveP, rejectP) => {
@@ -324,25 +334,53 @@ server.tool(
             }
             if (event.error) {
               outputLines.push(event.error);
+              buildErrorSeen = true;
+            }
+            if (event.aux?.ID) {
+              builtImageId = event.aux.ID;
             }
           },
         );
       });
 
       const timeoutPromise = new Promise<never>((_, rejectP) => {
-        setTimeout(() => {
+        timer = setTimeout(() => {
           (stream as any).destroy?.();
           rejectP(new Error('Build timed out'));
         }, timeout * 1000);
       });
 
       await Promise.race([buildPromise, timeoutPromise]);
+      clearTimeout(timer);
 
       const tail = outputLines.slice(-50).join('\n');
+
+      // BuildKit may resolve the stream without an error callback even when
+      // a build step fails — detect this via error events in the stream.
+      if (buildErrorSeen) {
+        await removeImage(imageTag);
+        if (builtImageId) await removeImage(builtImageId);
+        return {
+          content: [{ type: 'text', text: `Build failed.\n\n${tail}` }],
+          isError: true,
+        };
+      }
+
+      // Clean up the verification image so it doesn't accumulate.
+      await removeImage(imageTag);
+
       return {
-        content: [{ type: 'text', text: `Build succeeded.\n\n${tail}` }],
+        content: [{ type: 'text', text: `Build succeeded (image cleaned up).\n\n${tail}` }],
       };
     } catch (err: any) {
+      clearTimeout(timer);
+
+      // Best-effort cleanup of partial/timed-out images.
+      if (builtImageId) {
+        await removeImage(builtImageId);
+      }
+      await removeImage(imageTag);
+
       if (err.message === 'Build timed out') {
         return {
           content: [{ type: 'text', text: `Build timed out after ${timeout}s.` }],

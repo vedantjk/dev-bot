@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, unlinkSync } from 'fs';
 import { resolve, join } from 'path';
+import { tmpdir } from 'os';
 import simpleGit from 'simple-git';
 import Docker from 'dockerode';
 
@@ -318,8 +319,8 @@ describe('delete_file', () => {
     expect(existsSync(filePath)).toBe(false);
   });
 
-  it('refuses to delete files outside repos/', async () => {
-    const outsidePath = join(TEST_DIR, 'outside.txt');
+  it('refuses to delete files outside repos/ and dev-bot root', async () => {
+    const outsidePath = join(tmpdir(), `devbot-test-outside-${Date.now()}.txt`);
     writeFileSync(outsidePath, 'should not be deleted', 'utf-8');
 
     const result = await client.callTool({
@@ -328,6 +329,8 @@ describe('delete_file', () => {
     });
     expect(result.isError).toBe(true);
     expect(existsSync(outsidePath)).toBe(true);
+
+    unlinkSync(outsidePath);
   });
 
   it('returns error for non-existent file', async () => {
@@ -343,66 +346,64 @@ describe('delete_file', () => {
 
 // ---------- docker_build ----------
 
+const TEST_DOCKERFILE = join(TEST_REPO_PATH, 'Dockerfile');
+
 describe.skipIf(!dockerAvailable)('docker_build', () => {
-  it('returns error when repo does not exist', async () => {
+  it('returns error when Dockerfile does not exist', async () => {
     const result = await client.callTool({
       name: 'docker_build',
-      arguments: { repo_name: 'nonexistent-repo' },
+      arguments: { dockerfile: '/nonexistent/path/Dockerfile' },
     });
     expect(result.isError).toBe(true);
     const text = (result.content as any)[0].text;
     expect(text).toContain('not found');
   });
 
-  it('returns error when repo has no Dockerfile', async () => {
+  it('succeeds with a trivial Dockerfile and cleans up image', async () => {
+    writeFileSync(TEST_DOCKERFILE, 'FROM alpine\nRUN echo "ok"\n', 'utf-8');
+
+    const tag = `devbot-test-${Date.now()}`;
     const result = await client.callTool({
       name: 'docker_build',
-      arguments: { repo_name: TEST_REPO_NAME },
-    });
-    expect(result.isError).toBe(true);
-    const text = (result.content as any)[0].text;
-    expect(text).toContain('No Dockerfile');
-  });
-
-  it('succeeds with a trivial Dockerfile', async () => {
-    writeFileSync(join(TEST_REPO_PATH, 'Dockerfile'), 'FROM alpine\nRUN echo "ok"\n', 'utf-8');
-
-    const result = await client.callTool({
-      name: 'docker_build',
-      arguments: { repo_name: TEST_REPO_NAME },
+      arguments: { dockerfile: TEST_DOCKERFILE, tag },
     });
     const text = (result.content as any)[0].text;
     expect(result.isError).toBeFalsy();
     expect(text).toContain('Build succeeded');
+    expect(text).toContain('cleaned up');
 
-    unlinkSync(join(TEST_REPO_PATH, 'Dockerfile'));
+    // Verify the image was removed
+    const docker = new Docker();
+    await expect(docker.getImage(tag).inspect()).rejects.toThrow();
+
+    unlinkSync(TEST_DOCKERFILE);
   }, 60_000);
 
   it('returns failure for a broken Dockerfile', async () => {
-    writeFileSync(join(TEST_REPO_PATH, 'Dockerfile'), 'FROM alpine\nRUN exit 1\n', 'utf-8');
+    writeFileSync(TEST_DOCKERFILE, 'FROM alpine\nRUN exit 1\n', 'utf-8');
 
     const result = await client.callTool({
       name: 'docker_build',
-      arguments: { repo_name: TEST_REPO_NAME },
+      arguments: { dockerfile: TEST_DOCKERFILE },
     });
     const text = (result.content as any)[0].text;
     expect(result.isError).toBe(true);
     expect(text).toContain('Build failed');
 
-    unlinkSync(join(TEST_REPO_PATH, 'Dockerfile'));
+    unlinkSync(TEST_DOCKERFILE);
   }, 60_000);
 
   it('respects timeout', async () => {
-    writeFileSync(join(TEST_REPO_PATH, 'Dockerfile'), 'FROM alpine\nRUN sleep 999\n', 'utf-8');
+    writeFileSync(TEST_DOCKERFILE, 'FROM alpine\nRUN sleep 999\n', 'utf-8');
 
     const result = await client.callTool({
       name: 'docker_build',
-      arguments: { repo_name: TEST_REPO_NAME, timeout: 2 },
+      arguments: { dockerfile: TEST_DOCKERFILE, timeout: 2 },
     });
     const text = (result.content as any)[0].text;
     expect(result.isError).toBe(true);
     expect(text).toContain('timed out');
 
-    unlinkSync(join(TEST_REPO_PATH, 'Dockerfile'));
+    unlinkSync(TEST_DOCKERFILE);
   }, 30_000);
 });

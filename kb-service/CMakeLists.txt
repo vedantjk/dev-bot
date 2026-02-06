@@ -63,6 +63,7 @@ target_link_libraries(kb-service PRIVATE
   pthread
   openblas
   lapack
+  gomp
 )
 
 # Link nlohmann_json if found as package
@@ -105,6 +106,7 @@ if(BUILD_TESTS)
     pthread
     openblas
     lapack
+    gomp
   )
 
   if(nlohmann_json_FOUND)
@@ -139,6 +141,7 @@ if(BUILD_TESTS)
     pthread
     openblas
     lapack
+    gomp
   )
 
   if(nlohmann_json_FOUND)
