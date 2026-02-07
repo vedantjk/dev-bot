@@ -13,10 +13,10 @@ namespace kb {
 class KnowledgeBase;
 class RequestHandler;
 
-class UnixSocketServer {
+class TCPServer {
 public:
-  UnixSocketServer(const std::string& socket_path, std::shared_ptr<KnowledgeBase> kb, std::shared_ptr<RequestHandler> handler);
-  ~UnixSocketServer();
+  TCPServer(int port, std::shared_ptr<KnowledgeBase> kb, std::shared_ptr<RequestHandler> handler);
+  ~TCPServer();
 
   void start();
   void stop();
@@ -27,7 +27,7 @@ private:
   void handleClient(int client_fd);
   void joinAllThreads();
 
-  std::string socket_path_;
+  int port_;
   std::shared_ptr<KnowledgeBase> kb_;
   std::shared_ptr<RequestHandler> handler_;
   int server_fd_;

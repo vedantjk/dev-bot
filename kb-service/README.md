@@ -6,7 +6,7 @@ A high-performance knowledge base service written in C++ that provides semantic 
 
 - **FAISS Index**: Fast approximate nearest neighbor search in high-dimensional space
 - **RocksDB Storage**: Persistent storage for memories and metadata
-- **Unix Socket API**: Lightweight IPC communication
+- **TCP Socket API**: Cross-platform network communication (Windows, Linux, macOS)
 - **Semantic Search**: Store and retrieve memories based on semantic similarity
 - **User Preferences**: Store and retrieve user-specific preferences
 
@@ -18,7 +18,7 @@ A high-performance knowledge base service written in C++ that provides semantic 
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ • FAISS index (in-memory)                                │  │
 │  │ • RocksDB (persistent storage)                           │  │
-│  │ • Unix socket server (/tmp/dev-bot-kb.sock)             │  │
+│  │ • TCP socket server (0.0.0.0:50051)                     │  │
 │  │                                                          │  │
 │  │ Endpoints:                                               │  │
 │  │ POST /add     - Store memory with embedding             │  │
@@ -46,7 +46,7 @@ A high-performance knowledge base service written in C++ that provides semantic 
 
 ```bash
 docker build -t kb-service .
-docker run -v /tmp:/tmp -v kb-data:/data kb-service
+docker run -p 50051:50051 -v kb-data:/data kb-service
 ```
 
 ### Manual Build
@@ -56,7 +56,7 @@ mkdir build
 cd build
 cmake ..
 make -j$(nproc)
-./kb-service --socket /tmp/dev-bot-kb.sock --db /data/kb.db
+./kb-service --port 50051 --db /data/kb.db
 ```
 
 ## Usage
@@ -67,7 +67,7 @@ make -j$(nproc)
 ./kb-service [options]
 
 Options:
-  --socket PATH   Unix socket path (default: /tmp/dev-bot-kb.sock)
+  --port PORT     TCP port to listen on (default: 50051)
   --db PATH       RocksDB path (default: /data/kb.db)
   --dim N         Embedding dimension (default: 1024)
   --help          Show this help
@@ -75,7 +75,7 @@ Options:
 
 ### API Protocol
 
-The service accepts JSON requests over Unix socket:
+The service accepts JSON requests over TCP socket:
 
 ```json
 {

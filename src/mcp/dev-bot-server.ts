@@ -415,8 +415,9 @@ server.tool(
 const docker = new Docker();
 
 // --- KB service client ---
-const KB_SOCKET_PATH = process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock';
-const kbClient = new KBClient(KB_SOCKET_PATH);
+const KB_HOST = process.env.KB_HOST ?? 'localhost';
+const KB_PORT = parseInt(process.env.KB_PORT ?? '50051', 10);
+const kbClient = new KBClient(KB_HOST, KB_PORT);
 
 mcpLogger.info('MCP server initialized');
 

@@ -84,9 +84,10 @@ export class RequestLogger {
     this.logFilePath = logFile;
 
     // Initialize KB client for storing memories
-    const KB_SOCKET_PATH = process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock';
+    const KB_HOST = process.env.KB_HOST ?? 'localhost';
+    const KB_PORT = parseInt(process.env.KB_PORT ?? '50051', 10);
     try {
-      this.kbClient = new KBClient(KB_SOCKET_PATH);
+      this.kbClient = new KBClient(KB_HOST, KB_PORT);
     } catch (error) {
       this.log.warn('KB client initialization failed, memory logging disabled');
       this.kbClient = null;

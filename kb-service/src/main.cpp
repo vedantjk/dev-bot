@@ -9,7 +9,7 @@
 #include <thread>
 #include <chrono>
 
-static std::unique_ptr<kb::UnixSocketServer> g_server;
+static std::unique_ptr<kb::TCPServer> g_server;
 
 void signalHandler(int signal) {
   std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
@@ -20,15 +20,15 @@ void signalHandler(int signal) {
 }
 
 int main(int argc, char* argv[]) {
-  std::string socket_path = "/tmp/dev-bot-kb.sock";
+  int port = 50051;
   std::string db_path = "/data/kb.db";
   int dimension = 1024;
 
   // Parse command-line arguments
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--socket" && i + 1 < argc) {
-      socket_path = argv[++i];
+    if (arg == "--port" && i + 1 < argc) {
+      port = std::stoi(argv[++i]);
     } else if (arg == "--db" && i + 1 < argc) {
       db_path = argv[++i];
     } else if (arg == "--dim" && i + 1 < argc) {
@@ -36,7 +36,7 @@ int main(int argc, char* argv[]) {
     } else if (arg == "--help") {
       std::cout << "Usage: " << argv[0] << " [options]\n"
                 << "Options:\n"
-                << "  --socket PATH   Unix socket path (default: /tmp/dev-bot-kb.sock)\n"
+                << "  --port PORT     TCP port to listen on (default: 50051)\n"
                 << "  --db PATH       RocksDB path (default: /data/kb.db)\n"
                 << "  --dim N         Embedding dimension (default: 1024)\n"
                 << "  --help          Show this help\n";
@@ -45,7 +45,7 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "KB Service starting...\n"
-            << "  Socket: " << socket_path << "\n"
+            << "  Port: " << port << "\n"
             << "  DB: " << db_path << "\n"
             << "  Dimension: " << dimension << std::endl;
 
@@ -56,7 +56,7 @@ int main(int argc, char* argv[]) {
     auto handler = std::make_shared<kb::RequestHandler>(kb, embedder);
 
     // Create server
-    g_server = std::make_unique<kb::UnixSocketServer>(socket_path, kb, handler);
+    g_server = std::make_unique<kb::TCPServer>(port, kb, handler);
 
     // Set up signal handlers
     std::signal(SIGINT, signalHandler);

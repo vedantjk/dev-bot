@@ -2,7 +2,8 @@
 #include "knowledge_base.h"
 #include "request_handler.h"
 #include <sys/socket.h>
-#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <iostream>
@@ -12,32 +13,37 @@
 
 namespace kb {
 
-UnixSocketServer::UnixSocketServer(const std::string& socket_path, std::shared_ptr<KnowledgeBase> kb, std::shared_ptr<RequestHandler> handler)
-  : socket_path_(socket_path), kb_(kb), handler_(handler), server_fd_(-1), running_(false), active_connections_(0) {}
+TCPServer::TCPServer(int port, std::shared_ptr<KnowledgeBase> kb, std::shared_ptr<RequestHandler> handler)
+  : port_(port), kb_(kb), handler_(handler), server_fd_(-1), running_(false), active_connections_(0) {}
 
-UnixSocketServer::~UnixSocketServer() {
+TCPServer::~TCPServer() {
   stop();
 }
 
-void UnixSocketServer::start() {
+void TCPServer::start() {
   // Create socket
-  server_fd_ = socket(AF_UNIX, SOCK_STREAM, 0);
+  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
     throw std::runtime_error("Failed to create socket");
   }
 
-  // Remove existing socket file
-  unlink(socket_path_.c_str());
+  // Set socket options to allow reuse
+  int opt = 1;
+  if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    close(server_fd_);
+    throw std::runtime_error("Failed to set socket options");
+  }
 
   // Bind socket
-  struct sockaddr_un addr;
+  struct sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(port_);
 
   if (bind(server_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
     close(server_fd_);
-    throw std::runtime_error("Failed to bind socket");
+    throw std::runtime_error("Failed to bind socket to port " + std::to_string(port_));
   }
 
   // Listen
@@ -47,13 +53,13 @@ void UnixSocketServer::start() {
   }
 
   running_ = true;
-  std::cout << "KB Service listening on " << socket_path_ << std::endl;
+  std::cout << "KB Service listening on 127.0.0.1:" << port_ << std::endl;
 
   // Accept connections in a separate thread
-  accept_thread_ = std::thread(&UnixSocketServer::acceptLoop, this);
+  accept_thread_ = std::thread(&TCPServer::acceptLoop, this);
 }
 
-void UnixSocketServer::stop() {
+void TCPServer::stop() {
   if (running_.exchange(false)) {
     // Close server socket to unblock accept()
     if (server_fd_ >= 0) {
@@ -74,12 +80,10 @@ void UnixSocketServer::stop() {
 
     // Join all client threads
     joinAllThreads();
-
-    unlink(socket_path_.c_str());
   }
 }
 
-void UnixSocketServer::acceptLoop() {
+void TCPServer::acceptLoop() {
   while (running_.load()) {
     // Check if still running before blocking on accept
     if (!running_.load()) {
@@ -108,7 +112,7 @@ void UnixSocketServer::acceptLoop() {
   }
 }
 
-void UnixSocketServer::joinAllThreads() {
+void TCPServer::joinAllThreads() {
   std::lock_guard<std::mutex> lock(threads_mutex_);
   for (auto& thread_ptr : client_threads_) {
     if (thread_ptr && thread_ptr->joinable()) {
@@ -118,7 +122,7 @@ void UnixSocketServer::joinAllThreads() {
   client_threads_.clear();
 }
 
-void UnixSocketServer::handleClient(int client_fd) {
+void TCPServer::handleClient(int client_fd) {
   // Read request
   char buffer[65536];
   ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);

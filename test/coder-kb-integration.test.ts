@@ -60,12 +60,13 @@ describe('Coder Agent KB Integration', () => {
     expect(systemPromptContent).toContain('automatically logged');
   });
 
-  it('verifies KB_SOCKET_PATH is passed to MCP server environment', () => {
+  it('verifies KB_HOST and KB_PORT are passed to MCP server environment', () => {
     const orchestratorPath = resolve('./src/ai/orchestrator.ts');
     const orchestratorContent = readFileSync(orchestratorPath, 'utf-8');
 
-    // Check that KB_SOCKET_PATH is in the MCP server environment
-    expect(orchestratorContent).toContain('KB_SOCKET_PATH');
+    // Check that KB_HOST and KB_PORT are in the MCP server environment
+    expect(orchestratorContent).toContain('KB_HOST');
+    expect(orchestratorContent).toContain('KB_PORT');
   });
 });
 

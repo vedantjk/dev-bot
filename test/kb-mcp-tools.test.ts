@@ -5,7 +5,7 @@ import { resolve } from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { existsSync, rmSync } from 'fs';
 
-const KB_SOCKET_PATH = '/tmp/dev-bot-kb-test.sock';
+const KB_PORT = 50052; // Use different port for testing
 const KB_DB_PATH = '/tmp/kb-test-db';
 
 let client: Client;
@@ -18,16 +18,13 @@ const kbServiceAvailable = existsSync(KB_SERVICE_BINARY);
 
 async function startKBService(): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Clean up any existing socket and db
-    if (existsSync(KB_SOCKET_PATH)) {
-      rmSync(KB_SOCKET_PATH);
-    }
+    // Clean up any existing db
     if (existsSync(KB_DB_PATH)) {
       rmSync(KB_DB_PATH, { recursive: true, force: true });
     }
 
     kbServiceProcess = spawn(KB_SERVICE_BINARY, [
-      '--socket', KB_SOCKET_PATH,
+      '--port', KB_PORT.toString(),
       '--db', KB_DB_PATH,
       '--dim', '128'
     ]);
@@ -63,9 +60,6 @@ function stopKBService(): void {
     kbServiceProcess = null;
   }
   // Clean up
-  if (existsSync(KB_SOCKET_PATH)) {
-    rmSync(KB_SOCKET_PATH);
-  }
   if (existsSync(KB_DB_PATH)) {
     rmSync(KB_DB_PATH, { recursive: true, force: true });
   }
@@ -80,13 +74,14 @@ beforeAll(async () => {
   // Start KB service
   await startKBService();
 
-  // Start MCP server with KB socket path
+  // Start MCP server with KB host and port
   transport = new StdioClientTransport({
     command: 'npx',
     args: ['tsx', 'src/mcp/dev-bot-server.ts'],
     env: {
       ...process.env,
-      KB_SOCKET_PATH,
+      KB_HOST: 'localhost',
+      KB_PORT: KB_PORT.toString(),
       REPOS_DIR: './test-tmp/repos',
       GLOBAL_DIR: './test-tmp/global',
       GITHUB_USERNAME: 'test-user',

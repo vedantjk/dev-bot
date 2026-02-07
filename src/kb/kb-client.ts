@@ -26,13 +26,15 @@ export interface KBResponse {
 }
 
 /**
- * Client for communicating with the kb-service via Unix socket
+ * Client for communicating with the kb-service via TCP
  */
 export class KBClient {
-  private socketPath: string;
+  private host: string;
+  private port: number;
 
-  constructor(socketPath: string = '/tmp/dev-bot-kb.sock') {
-    this.socketPath = socketPath;
+  constructor(host: string = 'localhost', port: number = 50051) {
+    this.host = host;
+    this.port = port;
   }
 
   /**
@@ -60,7 +62,7 @@ export class KBClient {
         reject(new Error(`Socket error: ${error.message}`));
       });
 
-      socket.connect(this.socketPath, () => {
+      socket.connect(this.port, this.host, () => {
         const request = JSON.stringify({ endpoint, params });
         socket.write(request);
         socket.end();

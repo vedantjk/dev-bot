@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  kb-service:
+    build:
+      context: ./kb-service
+      dockerfile: Dockerfile
+    ports:
+      - "50051:50051"
+    volumes:
+      - kb-data:/data
+    environment:
+      - PORT=50051
+    restart: unless-stopped
+    container_name: dev-bot-kb-service
+
+volumes:
+  kb-data:
+    driver: local

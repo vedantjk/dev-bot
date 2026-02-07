@@ -1,8 +1,6 @@
 FROM ubuntu:22.04
 
-# NOTE: This service uses Unix domain sockets which are only supported on Linux/macOS.
-# For Windows compatibility, the service would need to be modified to use TCP sockets.
-# To run on Windows, use Docker Desktop with WSL2 backend or modify the code to use TCP.
+# NOTE: This service now uses TCP sockets for cross-platform compatibility with Windows.
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -63,8 +61,9 @@ RUN cd build && \
 # Create data directory
 RUN mkdir -p /data
 
-# Expose unix socket
-VOLUME ["/tmp", "/data"]
+# Expose TCP port and data volume
+EXPOSE 50051
+VOLUME ["/data"]
 
 # Run the service
-CMD ["./build/kb-service"]
+CMD ["./build/kb-service", "--port", "50051"]
