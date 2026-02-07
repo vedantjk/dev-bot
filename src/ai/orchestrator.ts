@@ -115,6 +115,7 @@ export class Orchestrator {
   private onUserQuestion: ((question: string, questionId: string) => void) | null;
   private onUserQuestionAnswered: ((questionId: string, answer: string) => void) | null;
   private questionWatcher: ReturnType<typeof fsWatch> | null = null;
+  private processedQuestions: Set<string> = new Set();
 
   constructor(options?: OrchestratorOptions) {
     this.onStatusMessage = options?.onStatusMessage ?? null;
@@ -136,6 +137,13 @@ export class Orchestrator {
           try {
             const data = JSON.parse(readFileSync(questionFile, 'utf-8'));
             const questionId = filename.replace('.question.json', '');
+
+            // Prevent duplicate processing of the same question
+            if (this.processedQuestions.has(questionId)) {
+              return;
+            }
+
+            this.processedQuestions.add(questionId);
             console.log(`[question] ${questionId}: ${data.question}`);
             this.onUserQuestion?.(data.question, questionId);
           } catch (err) {
@@ -162,6 +170,9 @@ export class Orchestrator {
     writeFileSync(answerFile, answer, 'utf-8');
     this.onUserQuestionAnswered?.(questionId, answer);
     console.log(`[answer] ${questionId}: ${answer.slice(0, 100)}${answer.length > 100 ? '...' : ''}`);
+
+    // Clean up the processed question from our set
+    this.processedQuestions.delete(questionId);
   }
 
   /** Run a single agent as an independent query() call. */
