@@ -10,6 +10,7 @@ import Docker from 'dockerode';
 const TEST_DIR = resolve('./test-tmp');
 const TEST_REPOS = join(TEST_DIR, 'repos');
 const TEST_GLOBAL = join(TEST_DIR, 'global');
+const TEST_QUESTIONS_DIR = join(TEST_DIR, 'questions');
 const TEST_REPO_NAME = 'test-repo';
 const TEST_REPO_PATH = join(TEST_REPOS, TEST_REPO_NAME);
 
@@ -35,6 +36,7 @@ beforeAll(async () => {
   // Create temp directories
   mkdirSync(TEST_REPOS, { recursive: true });
   mkdirSync(TEST_GLOBAL, { recursive: true });
+  mkdirSync(TEST_QUESTIONS_DIR, { recursive: true });
 
   // Seed REVIEW_STANDARDS.md
   writeFileSync(
@@ -61,6 +63,7 @@ beforeAll(async () => {
       ...process.env,
       REPOS_DIR: TEST_REPOS,
       GLOBAL_DIR: TEST_GLOBAL,
+      QUESTIONS_DIR: TEST_QUESTIONS_DIR,
       GITHUB_USERNAME: 'test-user',
       GITHUB_TOKEN: '',
       DEV_BOT_ROOT: resolve('.'),
@@ -93,6 +96,7 @@ describe('tool listing', () => {
     expect(names).toContain('create_github_repo');
     expect(names).toContain('delete_file');
     expect(names).toContain('send_status');
+    expect(names).toContain('ask_user');
     expect(names).toContain('write_steering_file');
     expect(names).toContain('docker_build');
     expect(names).toContain('kb_add');
@@ -412,4 +416,48 @@ describe.skipIf(!dockerAvailable)('docker_build', () => {
 
     unlinkSync(TEST_DOCKERFILE);
   }, 30_000);
+});
+
+// ---------- ask_user ----------
+
+describe('ask_user', () => {
+  it('times out when no answer is provided', async () => {
+    const resultPromise = client.callTool({
+      name: 'ask_user',
+      arguments: { question: 'What is your name?', timeout_seconds: 1 },
+    });
+
+    // Wait for the result (should timeout)
+    const result = await resultPromise;
+    const text = (result.content as any)[0].text;
+    expect(text).toContain('TIMEOUT');
+  }, 5_000);
+
+  it('returns user answer when answer file is written', async () => {
+    const resultPromise = client.callTool({
+      name: 'ask_user',
+      arguments: { question: 'What is your favorite color?', timeout_seconds: 5 },
+    });
+
+    // Wait a bit for the question file to be written
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Find the question file
+    const files = readdirSync(TEST_QUESTIONS_DIR);
+    const questionFile = files.find((f) => f.endsWith('.question.json'));
+    expect(questionFile).toBeDefined();
+
+    if (questionFile) {
+      const questionId = questionFile.replace('.question.json', '');
+      const answerFile = join(TEST_QUESTIONS_DIR, `${questionId}.answer.txt`);
+
+      // Write the answer
+      writeFileSync(answerFile, 'Blue', 'utf-8');
+
+      // Wait for the result
+      const result = await resultPromise;
+      const text = (result.content as any)[0].text;
+      expect(text).toContain('User responded: Blue');
+    }
+  }, 10_000);
 });

@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import simpleGit from 'simple-git';
-import { existsSync, unlinkSync, appendFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, unlinkSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, watch as fsWatch } from 'fs';
 import { resolve, join, dirname, basename } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -282,6 +282,101 @@ server.tool(
     return {
       content: [{ type: 'text', text: `Status sent: "${message}"` }],
     };
+  },
+);
+
+// --- ask_user ---
+// Allows the agent to ask questions and wait for user response with a timeout
+// Uses file-based IPC for communication between MCP server and orchestrator
+
+const QUESTIONS_DIR = process.env.QUESTIONS_DIR ?? resolve('./tmp/questions');
+
+// Ensure questions directory exists
+if (!existsSync(QUESTIONS_DIR)) {
+  mkdirSync(QUESTIONS_DIR, { recursive: true });
+}
+
+server.tool(
+  'ask_user',
+  'Ask the user a question and wait for their response. Default timeout is 5 minutes. If no answer comes, the agent can proceed with their best understanding.',
+  {
+    question: z.string().describe('The question to ask the user'),
+    timeout_seconds: z.number().optional().default(300).describe('Timeout in seconds (default: 300 = 5 minutes)'),
+  },
+  async ({ question, timeout_seconds }) => {
+    try {
+      const questionId = `q-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+      const questionFile = join(QUESTIONS_DIR, `${questionId}.question.json`);
+      const answerFile = join(QUESTIONS_DIR, `${questionId}.answer.txt`);
+
+      // Write the question to a file that the orchestrator will pick up
+      writeFileSync(questionFile, JSON.stringify({ question, timeout_seconds, timestamp: Date.now() }), 'utf-8');
+
+      mcpLogger.info({ questionId, question, timeout_seconds }, 'User question written to file');
+      logToolCall('ask_user', { question, timeout_seconds, questionId });
+
+      // Wait for the answer file to appear or timeout
+      const answer = await new Promise<string>((resolve) => {
+        let timeoutId: NodeJS.Timeout | undefined;
+        let watcher: ReturnType<typeof fsWatch> | undefined;
+
+        const cleanup = () => {
+          if (timeoutId) clearTimeout(timeoutId);
+          if (watcher) watcher.close();
+          // Clean up question file
+          if (existsSync(questionFile)) unlinkSync(questionFile);
+        };
+
+        const checkAnswer = () => {
+          if (existsSync(answerFile)) {
+            try {
+              const answer = readFileSync(answerFile, 'utf-8');
+              unlinkSync(answerFile);
+              cleanup();
+              resolve(answer);
+            } catch (err: any) {
+              // File exists but not ready yet; retry after a short delay
+              mcpLogger.warn({ questionId, error: err.message }, 'Answer file read failed, retrying...');
+              setTimeout(checkAnswer, 100);
+            }
+          }
+        };
+
+        // Watch for answer file creation
+        watcher = fsWatch(QUESTIONS_DIR, (eventType, filename) => {
+          if (filename === `${questionId}.answer.txt`) {
+            checkAnswer();
+          }
+        });
+
+        // Check immediately in case answer was written before we started watching
+        checkAnswer();
+
+        // Set timeout
+        timeoutId = setTimeout(() => {
+          cleanup();
+          resolve('[TIMEOUT: No response received within the timeout period. Proceed with your best understanding.]');
+        }, timeout_seconds * 1000);
+      });
+
+      mcpLogger.info({ questionId, answerLength: answer.length }, 'User question answered');
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: answer.startsWith('[TIMEOUT:') ? answer : `User responded: ${answer}`,
+        }],
+      };
+    } catch (err: any) {
+      logToolCall('ask_user', { question, timeout_seconds }, undefined, err);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Failed to get user response: ${err.message}. Proceed with your best understanding.`,
+        }],
+        isError: true,
+      };
+    }
   },
 );
 

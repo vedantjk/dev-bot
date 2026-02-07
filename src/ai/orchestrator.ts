@@ -1,6 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolve } from 'path';
-import { readdirSync } from 'fs';
+import { resolve, join } from 'path';
+import { readdirSync, existsSync, readFileSync, writeFileSync, unlinkSync, watch as fsWatch, mkdirSync } from 'fs';
 import simpleGit from 'simple-git';
 import { config } from '../config.js';
 import { buildCoderPrompt, buildReviewerPrompt, buildCommitterPrompt } from './system-prompt.js';
@@ -8,6 +8,8 @@ import { RequestLogger } from '../logger.js';
 
 interface OrchestratorOptions {
   onStatusMessage?: (message: string) => void;
+  onUserQuestion?: (question: string, questionId: string) => void;
+  onUserQuestionAnswered?: (questionId: string, answer: string) => void;
 }
 
 type AgentType = 'coder' | 'reviewer' | 'committer';
@@ -33,6 +35,7 @@ const ALL_MCP_TOOLS = [
   'mcp__dev-bot__create_github_repo',
   'mcp__dev-bot__delete_file',
   'mcp__dev-bot__send_status',
+  'mcp__dev-bot__ask_user',
   'mcp__dev-bot__write_steering_file',
   'mcp__dev-bot__docker_build',
   'mcp__dev-bot__kb_add',
@@ -60,6 +63,7 @@ const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
         'mcp__dev-bot__git_clone',
         'mcp__dev-bot__git_pull',
         'mcp__dev-bot__delete_file',
+        'mcp__dev-bot__ask_user',
         'mcp__dev-bot__docker_build',
         'mcp__dev-bot__kb_add',
         'mcp__dev-bot__kb_search',
@@ -104,19 +108,60 @@ interface AgentResult {
   toolsUsed: Set<string>;
 }
 
+const QUESTIONS_DIR = resolve('./tmp/questions');
+
 export class Orchestrator {
   private onStatusMessage: ((message: string) => void) | null;
+  private onUserQuestion: ((question: string, questionId: string) => void) | null;
+  private onUserQuestionAnswered: ((questionId: string, answer: string) => void) | null;
+  private questionWatcher: ReturnType<typeof fsWatch> | null = null;
 
   constructor(options?: OrchestratorOptions) {
     this.onStatusMessage = options?.onStatusMessage ?? null;
+    this.onUserQuestion = options?.onUserQuestion ?? null;
+    this.onUserQuestionAnswered = options?.onUserQuestionAnswered ?? null;
   }
 
   async start(): Promise<void> {
     console.log('Orchestrator ready (manual chaining mode)');
+
+    // Ensure questions directory exists before watching
+    mkdirSync(QUESTIONS_DIR, { recursive: true });
+
+    // Start watching for user questions
+    this.questionWatcher = fsWatch(QUESTIONS_DIR, (eventType, filename) => {
+      if (filename && filename.endsWith('.question.json')) {
+        const questionFile = join(QUESTIONS_DIR, filename);
+        if (existsSync(questionFile)) {
+          try {
+            const data = JSON.parse(readFileSync(questionFile, 'utf-8'));
+            const questionId = filename.replace('.question.json', '');
+            console.log(`[question] ${questionId}: ${data.question}`);
+            this.onUserQuestion?.(data.question, questionId);
+          } catch (err) {
+            console.error('Failed to process question file:', err);
+          }
+        }
+      }
+    });
   }
 
   async shutdown(): Promise<void> {
     console.log('Orchestrator shutdown');
+    if (this.questionWatcher) {
+      this.questionWatcher.close();
+      this.questionWatcher = null;
+    }
+  }
+
+  /**
+   * Answer a pending user question. Called by the main loop when user responds.
+   */
+  answerQuestion(questionId: string, answer: string): void {
+    const answerFile = join(QUESTIONS_DIR, `${questionId}.answer.txt`);
+    writeFileSync(answerFile, answer, 'utf-8');
+    this.onUserQuestionAnswered?.(questionId, answer);
+    console.log(`[answer] ${questionId}: ${answer.slice(0, 100)}${answer.length > 100 ? '...' : ''}`);
   }
 
   /** Run a single agent as an independent query() call. */
@@ -151,6 +196,7 @@ export class Orchestrator {
               REPOS_DIR: resolve('./repos'),
               GLOBAL_DIR: resolve('./global'),
               DEV_BOT_ROOT: resolve('.'),
+              QUESTIONS_DIR: resolve('./tmp/questions'),
               KB_SOCKET_PATH: process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock',
             },
           },

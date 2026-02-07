@@ -4,6 +4,7 @@ import { Orchestrator } from './ai/orchestrator.js';
 import { logger } from './logger.js';
 
 let processing = false;
+let pendingQuestionId: string | null = null;
 
 async function main() {
   logger.info('Starting Dev Bot...');
@@ -23,6 +24,22 @@ async function main() {
         }
       }
     },
+    onUserQuestion: async (question, questionId) => {
+      if (currentSender) {
+        pendingQuestionId = questionId;
+        try {
+          await whatsapp.sendMessage(currentSender, `❓ ${question}`);
+          logger.info({ questionId, question }, 'User question sent');
+        } catch (err) {
+          logger.error({ err, questionId }, 'Failed to send user question');
+          console.error('Failed to send user question:', err);
+        }
+      }
+    },
+    onUserQuestionAnswered: async (questionId, answer) => {
+      logger.info({ questionId, answer }, 'User question answered');
+      pendingQuestionId = null;
+    },
   });
 
   // Graceful shutdown
@@ -39,6 +56,13 @@ async function main() {
   process.on('SIGTERM', shutdown);
 
   whatsapp.onMessage(async (sender, text) => {
+    // If there's a pending question, treat this message as an answer
+    if (pendingQuestionId && sender === currentSender) {
+      logger.info({ sender, questionId: pendingQuestionId, answer: text }, 'Answering pending question');
+      orchestrator.answerQuestion(pendingQuestionId, text);
+      return;
+    }
+
     if (processing) {
       logger.warn({ sender }, 'Request rejected: already processing');
       await whatsapp.sendMessage(sender, 'Already working on a task. Please wait.');
@@ -62,6 +86,7 @@ async function main() {
     } finally {
       processing = false;
       currentSender = null;
+      pendingQuestionId = null;
     }
   });
 
