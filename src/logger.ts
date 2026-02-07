@@ -14,6 +14,12 @@ if (!existsSync(LOGS_DIR)) {
 const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('.')[0];
 const logFile = join(LOGS_DIR, `dev-bot-${timestamp}.log`);
 
+// Create file destination stream (stored for flush access)
+const fileDestination = pino.destination({
+  dest: logFile,
+  sync: false,
+});
+
 // Create base logger with file and console transports
 const logger = pino({
   level: 'info',
@@ -33,10 +39,7 @@ const logger = pino({
   // File transport - all logs
   {
     level: 'trace',
-    stream: pino.destination({
-      dest: logFile,
-      sync: false,
-    }),
+    stream: fileDestination,
   },
   // Console transport - formatted for readability
   {
@@ -53,7 +56,7 @@ const logger = pino({
   },
 ]));
 
-export { logger, LOGS_DIR };
+export { logger, LOGS_DIR, logFile, fileDestination };
 
 /**
  * Create a child logger for a specific component.
@@ -70,11 +73,15 @@ export class RequestLogger {
   private log: pino.Logger;
   private startTime: number;
   private kbClient: KBClient | null;
+  private logFilePath: string;
 
   constructor(requestId: string) {
     this.requestId = requestId;
     this.log = logger.child({ requestId });
     this.startTime = Date.now();
+
+    // Store log file path - use the same file that pino is writing to
+    this.logFilePath = logFile;
 
     // Initialize KB client for storing memories
     const KB_SOCKET_PATH = process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock';
@@ -209,75 +216,43 @@ export class RequestLogger {
   }
 
   /**
-   * Log KB operations and store as memory.
+   * Store the request log in the KB for future reference.
+   * This should be called at the end of the request.
    */
-  async kbOperation(
-    operation: 'add' | 'search' | 'update' | 'remove' | 'update_preference' | 'get_preference',
-    params: any,
-    result?: any,
-    error?: any
-  ) {
-    this.log.info({
-      event: 'kb_operation',
-      operation,
-      params,
-      result: result ? this.truncate(JSON.stringify(result), 500) : undefined,
-      error: error ? error.message : undefined,
-    }, `KB: ${operation}`);
-
-    // Store KB operation as a memory for future reference
-    // Skip logging for 'add' operations with category 'kb-operation' to prevent recursion
-    if (this.kbClient && !error && !(operation === 'add' && params.category === 'kb-operation')) {
-      try {
-        const memoryContent = this.formatKBOperationAsMemory(operation, params, result);
-        await this.kbClient.add(memoryContent, 'kb-operation');
-      } catch (memError) {
-        this.log.warn({
-          event: 'kb_memory_storage_failed',
-          error: memError instanceof Error ? memError.message : String(memError),
-        }, 'Failed to store KB operation as memory');
-      }
-    }
-  }
-
-  /**
-   * Format KB operation as a memory entry.
-   */
-  private formatKBOperationAsMemory(
-    operation: string,
-    params: any,
-    result?: any
-  ): string {
-    const timestamp = new Date().toISOString();
-    let content = `[${timestamp}] KB Operation: ${operation}\n`;
-
-    switch (operation) {
-      case 'add':
-        content += `Added memory: "${params.content}" (category: ${params.category || 'general'})`;
-        if (result?.id) content += `\nMemory ID: ${result.id}`;
-        break;
-      case 'search':
-        content += `Searched for: "${params.query}" (top_k: ${params.top_k || 5})`;
-        if (result?.results?.length > 0) {
-          content += `\nFound ${result.results.length} results`;
-        }
-        break;
-      case 'update':
-        content += `Updated memory ${params.id}: "${params.content}"`;
-        break;
-      case 'remove':
-        content += `Removed memory ${params.id}`;
-        break;
-      case 'update_preference':
-        content += `Set preference '${params.key}' = '${params.value}'`;
-        break;
-      case 'get_preference':
-        content += `Retrieved preference '${params.key}'`;
-        if (result?.value) content += ` = '${result.value}'`;
-        break;
+  async storeLogInKB() {
+    if (!this.kbClient) {
+      this.log.warn('KB client not available, skipping log storage');
+      return;
     }
 
-    return content;
+    try {
+      // Ensure all logs are flushed to file before reading
+      await new Promise<void>((resolve, reject) => {
+        fileDestination.flush((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+
+      // Read the log file content
+      const { readFileSync } = await import('fs');
+      const logContent = readFileSync(this.logFilePath, 'utf-8');
+
+      // Store as a memory with category 'request-log'
+      const timestamp = new Date().toISOString();
+      const memoryContent = `Request Log [${timestamp}]\nRequest ID: ${this.requestId}\n\n${logContent}`;
+
+      await this.kbClient.add(memoryContent, 'request-log');
+      this.log.info({
+        event: 'log_stored_in_kb',
+        requestId: this.requestId,
+      }, 'Request log stored in KB');
+    } catch (error) {
+      this.log.warn({
+        event: 'log_storage_failed',
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Failed to store log in KB');
+    }
   }
 
   /**

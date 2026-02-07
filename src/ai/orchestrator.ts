@@ -342,10 +342,18 @@ export class Orchestrator {
       console.log('='.repeat(60));
 
       requestLogger.response(finalReply);
+
+      // Store the request log in KB
+      await requestLogger.storeLogInKB();
+
       return finalReply;
     } catch (err: any) {
       console.error('Orchestrator error:', err.message);
       requestLogger.error(err);
+
+      // Store the request log in KB even on error
+      await requestLogger.storeLogInKB();
+
       throw err;
     }
   }

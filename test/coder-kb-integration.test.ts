@@ -69,44 +69,16 @@ describe('Coder Agent KB Integration', () => {
   });
 });
 
-describe('KB Operation Logging', () => {
-  it('verifies logAndStoreKBOperation function exists in MCP server', () => {
+describe('Request Log Storage', () => {
+  it('verifies logToolCall function exists in MCP server', () => {
     const mcpServerPath = resolve('./src/mcp/dev-bot-server.ts');
     const mcpServerContent = readFileSync(mcpServerPath, 'utf-8');
 
     // Check for the logging function
-    expect(mcpServerContent).toContain('logAndStoreKBOperation');
+    expect(mcpServerContent).toContain('logToolCall');
   });
 
-  it('verifies recursion prevention logic', () => {
-    const mcpServerPath = resolve('./src/mcp/dev-bot-server.ts');
-    const mcpServerContent = readFileSync(mcpServerPath, 'utf-8');
-
-    // Check for recursion prevention
-    expect(mcpServerContent).toContain('kb-operation');
-    expect(mcpServerContent).toContain('prevent recursion');
-  });
-
-  it('formats memory storage prevention correctly', () => {
-    // Test that we prevent recursion by checking category
-    const operation = 'add';
-    const input = { category: 'kb-operation', content: 'test' };
-
-    // The check should prevent storing when category is 'kb-operation'
-    const shouldSkip = operation === 'add' && input.category === 'kb-operation';
-    expect(shouldSkip).toBe(true);
-  });
-
-  it('allows normal add operations to be logged', () => {
-    const operation = 'add';
-    const input = { category: 'general', content: 'test' };
-
-    // Normal operations should be logged
-    const shouldSkip = operation === 'add' && input.category === 'kb-operation';
-    expect(shouldSkip).toBe(false);
-  });
-
-  it('verifies all KB operations have logging handlers', () => {
+  it('verifies all KB operations use logToolCall', () => {
     const mcpServerPath = resolve('./src/mcp/dev-bot-server.ts');
     const mcpServerContent = readFileSync(mcpServerPath, 'utf-8');
 
@@ -119,9 +91,8 @@ describe('KB Operation Logging', () => {
       'get_preference',
     ];
 
-    // Each operation should call logAndStoreKBOperation
+    // Each operation should have a handler
     for (const op of operations) {
-      // Check that the operation has a handler
       expect(mcpServerContent).toContain(`kb_${op}`);
     }
   });
@@ -137,12 +108,20 @@ describe('RequestLogger KB Integration', () => {
     expect(loggerContent).toContain('kb/kb-client');
   });
 
-  it('verifies RequestLogger has kbOperation method', () => {
+  it('verifies RequestLogger has storeLogInKB method', () => {
     const loggerPath = resolve('./src/logger.ts');
     const loggerContent = readFileSync(loggerPath, 'utf-8');
 
-    // Check for kbOperation method
-    expect(loggerContent).toContain('kbOperation');
-    expect(loggerContent).toContain('formatKBOperationAsMemory');
+    // Check for storeLogInKB method
+    expect(loggerContent).toContain('storeLogInKB');
+    expect(loggerContent).toContain('request-log');
+  });
+
+  it('verifies orchestrator calls storeLogInKB', () => {
+    const orchestratorPath = resolve('./src/ai/orchestrator.ts');
+    const orchestratorContent = readFileSync(orchestratorPath, 'utf-8');
+
+    // Check that orchestrator calls storeLogInKB
+    expect(orchestratorContent).toContain('storeLogInKB');
   });
 });
