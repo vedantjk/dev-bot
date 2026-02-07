@@ -46,7 +46,7 @@ function mcpToolsExcept(...allowed: string[]): string[] {
 const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
   coder: {
     systemPrompt: buildCoderPrompt(),
-    maxTurns: 25,
+    maxTurns: 50,
     disallowedTools: [
       ...ALWAYS_BLOCKED,
       'WebSearch', 'WebFetch',
@@ -86,6 +86,12 @@ const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
   },
 };
 
+/** Result from a single agent run, including which tools it called. */
+interface AgentResult {
+  text: string;
+  toolsUsed: Set<string>;
+}
+
 export class Orchestrator {
   private onStatusMessage: ((message: string) => void) | null;
 
@@ -102,9 +108,10 @@ export class Orchestrator {
   }
 
   /** Run a single agent as an independent query() call. */
-  private async runAgent(prompt: string, agent: AgentType, requestLogger: RequestLogger): Promise<string> {
+  private async runAgent(prompt: string, agent: AgentType, requestLogger: RequestLogger, maxTurnsOverride?: number): Promise<AgentResult> {
     const cfg = AGENT_CONFIGS[agent];
     let finalResult = '(no response)';
+    const toolsUsed = new Set<string>();
 
     console.log(`\n--- ${agent.toUpperCase()} AGENT ---`);
     requestLogger.agentStart(agent, prompt);
@@ -116,7 +123,7 @@ export class Orchestrator {
         disallowedTools: cfg.disallowedTools,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        maxTurns: cfg.maxTurns,
+        maxTurns: maxTurnsOverride ?? cfg.maxTurns,
         systemPrompt: {
           type: 'preset',
           preset: 'claude_code',
@@ -151,9 +158,11 @@ export class Orchestrator {
             requestLogger.agentThinking(agent, block.text);
           }
           if (typeof block === 'object' && 'name' in block) {
+            const toolName = (block as any).name as string;
             const input = JSON.stringify((block as any).input ?? {});
-            console.log(`  [tool] ${(block as any).name}(${input.slice(0, 150)}${input.length > 150 ? '...' : ''})`);
-            requestLogger.toolUsage(agent, (block as any).name, (block as any).input);
+            console.log(`  [tool] ${toolName}(${input.slice(0, 150)}${input.length > 150 ? '...' : ''})`);
+            requestLogger.toolUsage(agent, toolName, (block as any).input);
+            toolsUsed.add(toolName);
           }
         }
       }
@@ -174,7 +183,7 @@ export class Orchestrator {
       }
     }
 
-    return finalResult;
+    return { text: finalResult, toolsUsed };
   }
 
   /** Stage all changes in every repo so git diff --staged shows the full picture. */
@@ -234,7 +243,23 @@ export class Orchestrator {
     try {
       // Phase 1: Coder — set up repo and implement changes
       sendStatus('Coding in progress...');
-      const coderResult = await this.runAgent(userMessage, 'coder', requestLogger);
+      const coderRun = await this.runAgent(userMessage, 'coder', requestLogger);
+      let coderResult = coderRun.text;
+
+      // Build gate: if the coder didn't run docker_build, run a focused follow-up
+      if (!coderRun.toolsUsed.has('mcp__dev-bot__docker_build')) {
+        console.log('  [build-gate] docker_build was not called — running build verification pass');
+        sendStatus('Running build verification...');
+        const buildPrompt = [
+          `The user originally requested: "${userMessage}"`,
+          '',
+          'The coding work is done but the Docker build verification was not run.',
+          'Create or update the Dockerfile in the repo root if needed, then run mcp__dev-bot__docker_build to verify the project builds.',
+          'If the build fails, fix the issue and rebuild until it passes.',
+        ].join('\n');
+        const buildRun = await this.runAgent(buildPrompt, 'coder', requestLogger, 15);
+        coderResult += '\n\n' + buildRun.text;
+      }
 
       // Stage all changes so the reviewer sees new files via git diff --staged
       await this.stageAllRepos(requestLogger);
@@ -249,7 +274,8 @@ export class Orchestrator {
         '',
         'Review the changes made in the repository. Use git_diff with staged=true to see all changes including new files.',
       ].join('\n');
-      const reviewResult = await this.runAgent(reviewerPrompt, 'reviewer', requestLogger);
+      const reviewRun = await this.runAgent(reviewerPrompt, 'reviewer', requestLogger);
+      const reviewResult = reviewRun.text;
 
       // Phase 3: Fix — address MUST-FIX items if any
       let fixResult = '';
@@ -264,7 +290,8 @@ export class Orchestrator {
           '',
           'Fix each issue listed above.',
         ].join('\n');
-        fixResult = await this.runAgent(fixPrompt, 'coder', requestLogger);
+        const fixRun = await this.runAgent(fixPrompt, 'coder', requestLogger);
+        fixResult = fixRun.text;
       }
 
       // Re-stage if fixes were made
@@ -279,7 +306,8 @@ export class Orchestrator {
         '',
         'All changes have been made and reviewed. Commit and push.',
       ].join('\n');
-      const commitResult = await this.runAgent(commitPrompt, 'committer', requestLogger);
+      const commitRun = await this.runAgent(commitPrompt, 'committer', requestLogger);
+      const commitResult = commitRun.text;
 
       // Phase 5: Compose final reply
       const parts = [`*What was done:*\n${coderResult}`];

@@ -22,6 +22,7 @@ RUN npm run build
 # Verify build artifacts exist
 RUN test -f dist/ai/orchestrator.js && \
     test -f dist/mcp/dev-bot-server.js && \
+    test -f dist/kb/kb-client.js && \
     echo "Build verification passed"
 
 CMD ["node", "dist/mcp/dev-bot-server.js"]

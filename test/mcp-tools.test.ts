@@ -95,6 +95,12 @@ describe('tool listing', () => {
     expect(names).toContain('send_status');
     expect(names).toContain('write_steering_file');
     expect(names).toContain('docker_build');
+    expect(names).toContain('kb_add');
+    expect(names).toContain('kb_search');
+    expect(names).toContain('kb_update');
+    expect(names).toContain('kb_remove');
+    expect(names).toContain('kb_update_preference');
+    expect(names).toContain('kb_get_preference');
   });
 });
 

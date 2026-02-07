@@ -8,6 +8,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Docker from 'dockerode';
 import pino from 'pino';
+import { KBClient } from '../kb/kb-client.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -318,7 +319,185 @@ server.tool(
 // --- docker_build ---
 const docker = new Docker();
 
+// --- KB service client ---
+const KB_SOCKET_PATH = process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock';
+const kbClient = new KBClient(KB_SOCKET_PATH);
+
 mcpLogger.info('MCP server initialized');
+
+// --- kb_add ---
+server.tool(
+  'kb_add',
+  'Add a memory to the knowledge base. The kb-service must be running.',
+  {
+    content: z.string().describe('Memory content to store'),
+    category: z.string().optional().default('general').describe('Category of the memory (e.g., preference, best-practice, workflow)'),
+    id: z.string().optional().describe('Optional custom ID for the memory'),
+  },
+  async ({ content, category, id }) => {
+    try {
+      const memoryId = await kbClient.add(content, category, id);
+      const result = {
+        content: [{ type: 'text' as const, text: `Memory added successfully. ID: ${memoryId}` }],
+      };
+      logToolCall('kb_add', { content, category, id }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to add memory: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_add', { content, category, id }, undefined, err);
+      return result;
+    }
+  },
+);
+
+// --- kb_search ---
+server.tool(
+  'kb_search',
+  'Search for memories in the knowledge base based on semantic similarity. The kb-service must be running.',
+  {
+    query: z.string().describe('Search query'),
+    top_k: z.number().optional().default(5).describe('Number of results to return (default: 5)'),
+  },
+  async ({ query, top_k }) => {
+    try {
+      const results = await kbClient.search(query, top_k);
+      if (results.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No memories found matching the query.' }],
+        };
+      }
+      const formatted = results.map((r, i) =>
+        `${i + 1}. [${r.category}] ${r.content}\n   Score: ${r.score.toFixed(4)} | ID: ${r.id}`
+      ).join('\n\n');
+      const result = {
+        content: [{ type: 'text' as const, text: `Found ${results.length} memories:\n\n${formatted}` }],
+      };
+      logToolCall('kb_search', { query, top_k }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to search: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_search', { query, top_k }, undefined, err);
+      return result;
+    }
+  },
+);
+
+// --- kb_update ---
+server.tool(
+  'kb_update',
+  'Update an existing memory in the knowledge base. The kb-service must be running.',
+  {
+    id: z.string().describe('Memory ID to update'),
+    content: z.string().describe('New content for the memory'),
+  },
+  async ({ id, content }) => {
+    try {
+      await kbClient.update(id, content);
+      const result = {
+        content: [{ type: 'text' as const, text: `Memory ${id} updated successfully.` }],
+      };
+      logToolCall('kb_update', { id, content }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to update memory: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_update', { id, content }, undefined, err);
+      return result;
+    }
+  },
+);
+
+// --- kb_remove ---
+server.tool(
+  'kb_remove',
+  'Remove a memory from the knowledge base. The kb-service must be running.',
+  {
+    id: z.string().describe('Memory ID to remove'),
+  },
+  async ({ id }) => {
+    try {
+      await kbClient.remove(id);
+      const result = {
+        content: [{ type: 'text' as const, text: `Memory ${id} removed successfully.` }],
+      };
+      logToolCall('kb_remove', { id }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to remove memory: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_remove', { id }, undefined, err);
+      return result;
+    }
+  },
+);
+
+// --- kb_update_preference ---
+server.tool(
+  'kb_update_preference',
+  'Store or update a user preference in the knowledge base. The kb-service must be running.',
+  {
+    key: z.string().describe('Preference key (e.g., "editor", "theme", "indentation")'),
+    value: z.string().describe('Preference value'),
+  },
+  async ({ key, value }) => {
+    try {
+      await kbClient.updatePreference(key, value);
+      const result = {
+        content: [{ type: 'text' as const, text: `Preference '${key}' set to '${value}'.` }],
+      };
+      logToolCall('kb_update_preference', { key, value }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to update preference: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_update_preference', { key, value }, undefined, err);
+      return result;
+    }
+  },
+);
+
+// --- kb_get_preference ---
+server.tool(
+  'kb_get_preference',
+  'Retrieve a user preference from the knowledge base. The kb-service must be running.',
+  {
+    key: z.string().describe('Preference key to retrieve'),
+  },
+  async ({ key }) => {
+    try {
+      const value = await kbClient.getPreference(key);
+      if (value === '') {
+        return {
+          content: [{ type: 'text' as const, text: `Preference '${key}' not found.` }],
+        };
+      }
+      const result = {
+        content: [{ type: 'text' as const, text: `Preference '${key}' = '${value}'` }],
+      };
+      logToolCall('kb_get_preference', { key }, result);
+      return result;
+    } catch (err: any) {
+      const result = {
+        content: [{ type: 'text' as const, text: `Failed to get preference: ${err.message}` }],
+        isError: true,
+      };
+      logToolCall('kb_get_preference', { key }, undefined, err);
+      return result;
+    }
+  },
+);
 
 /** Best-effort removal of a Docker image by tag or ID. */
 async function removeImage(ref: string): Promise<void> {
