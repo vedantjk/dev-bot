@@ -1,6 +1,7 @@
 import pino from 'pino';
 import { existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
+import { KBClient } from './kb/kb-client.js';
 
 const LOGS_DIR = resolve('./logs');
 
@@ -68,11 +69,21 @@ export class RequestLogger {
   private requestId: string;
   private log: pino.Logger;
   private startTime: number;
+  private kbClient: KBClient | null;
 
   constructor(requestId: string) {
     this.requestId = requestId;
     this.log = logger.child({ requestId });
     this.startTime = Date.now();
+
+    // Initialize KB client for storing memories
+    const KB_SOCKET_PATH = process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock';
+    try {
+      this.kbClient = new KBClient(KB_SOCKET_PATH);
+    } catch (error) {
+      this.log.warn('KB client initialization failed, memory logging disabled');
+      this.kbClient = null;
+    }
   }
 
   /**
@@ -195,6 +206,78 @@ export class RequestLogger {
       repo,
       ...details,
     }, `Git: ${operation} on ${repo}`);
+  }
+
+  /**
+   * Log KB operations and store as memory.
+   */
+  async kbOperation(
+    operation: 'add' | 'search' | 'update' | 'remove' | 'update_preference' | 'get_preference',
+    params: any,
+    result?: any,
+    error?: any
+  ) {
+    this.log.info({
+      event: 'kb_operation',
+      operation,
+      params,
+      result: result ? this.truncate(JSON.stringify(result), 500) : undefined,
+      error: error ? error.message : undefined,
+    }, `KB: ${operation}`);
+
+    // Store KB operation as a memory for future reference
+    // Skip logging for 'add' operations with category 'kb-operation' to prevent recursion
+    if (this.kbClient && !error && !(operation === 'add' && params.category === 'kb-operation')) {
+      try {
+        const memoryContent = this.formatKBOperationAsMemory(operation, params, result);
+        await this.kbClient.add(memoryContent, 'kb-operation');
+      } catch (memError) {
+        this.log.warn({
+          event: 'kb_memory_storage_failed',
+          error: memError instanceof Error ? memError.message : String(memError),
+        }, 'Failed to store KB operation as memory');
+      }
+    }
+  }
+
+  /**
+   * Format KB operation as a memory entry.
+   */
+  private formatKBOperationAsMemory(
+    operation: string,
+    params: any,
+    result?: any
+  ): string {
+    const timestamp = new Date().toISOString();
+    let content = `[${timestamp}] KB Operation: ${operation}\n`;
+
+    switch (operation) {
+      case 'add':
+        content += `Added memory: "${params.content}" (category: ${params.category || 'general'})`;
+        if (result?.id) content += `\nMemory ID: ${result.id}`;
+        break;
+      case 'search':
+        content += `Searched for: "${params.query}" (top_k: ${params.top_k || 5})`;
+        if (result?.results?.length > 0) {
+          content += `\nFound ${result.results.length} results`;
+        }
+        break;
+      case 'update':
+        content += `Updated memory ${params.id}: "${params.content}"`;
+        break;
+      case 'remove':
+        content += `Removed memory ${params.id}`;
+        break;
+      case 'update_preference':
+        content += `Set preference '${params.key}' = '${params.value}'`;
+        break;
+      case 'get_preference':
+        content += `Retrieved preference '${params.key}'`;
+        if (result?.value) content += ` = '${result.value}'`;
+        break;
+    }
+
+    return content;
   }
 
   /**

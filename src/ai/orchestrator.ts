@@ -35,6 +35,12 @@ const ALL_MCP_TOOLS = [
   'mcp__dev-bot__send_status',
   'mcp__dev-bot__write_steering_file',
   'mcp__dev-bot__docker_build',
+  'mcp__dev-bot__kb_add',
+  'mcp__dev-bot__kb_search',
+  'mcp__dev-bot__kb_update',
+  'mcp__dev-bot__kb_remove',
+  'mcp__dev-bot__kb_update_preference',
+  'mcp__dev-bot__kb_get_preference',
 ];
 
 /** Return all MCP tool names EXCEPT the ones listed. */
@@ -55,6 +61,12 @@ const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
         'mcp__dev-bot__git_pull',
         'mcp__dev-bot__delete_file',
         'mcp__dev-bot__docker_build',
+        'mcp__dev-bot__kb_add',
+        'mcp__dev-bot__kb_search',
+        'mcp__dev-bot__kb_update',
+        'mcp__dev-bot__kb_remove',
+        'mcp__dev-bot__kb_update_preference',
+        'mcp__dev-bot__kb_get_preference',
       ),
     ],
   },
@@ -139,6 +151,7 @@ export class Orchestrator {
               REPOS_DIR: resolve('./repos'),
               GLOBAL_DIR: resolve('./global'),
               DEV_BOT_ROOT: resolve('.'),
+              KB_SOCKET_PATH: process.env.KB_SOCKET_PATH ?? '/tmp/dev-bot-kb.sock',
             },
           },
         },

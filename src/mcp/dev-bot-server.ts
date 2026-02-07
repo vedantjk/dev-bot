@@ -57,6 +57,60 @@ function logToolCall(toolName: string, input: any, result?: any, error?: any) {
   }, `Tool: ${toolName}`);
 }
 
+/** Helper to log KB operations and store as memories */
+async function logAndStoreKBOperation(
+  operation: string,
+  input: any,
+  result?: any,
+  error?: any
+): Promise<void> {
+  logToolCall(`kb_${operation}`, input, result, error);
+
+  // Store KB operation as a memory for future reference
+  // Skip logging for 'add' operations with category 'kb-operation' to prevent recursion
+  if (!error && !(operation === 'add' && input.category === 'kb-operation')) {
+    try {
+      const timestamp = new Date().toISOString();
+      let memoryContent = `[${timestamp}] KB Operation: ${operation}\n`;
+
+      switch (operation) {
+        case 'add':
+          memoryContent += `Added memory: "${input.content}" (category: ${input.category || 'general'})`;
+          if (result?.id) memoryContent += `\nMemory ID: ${result.id}`;
+          break;
+        case 'search':
+          memoryContent += `Searched for: "${input.query}" (top_k: ${input.top_k || 5})`;
+          if (result?.results?.length > 0) {
+            memoryContent += `\nFound ${result.results.length} results`;
+          }
+          break;
+        case 'update':
+          memoryContent += `Updated memory ${input.id}: "${input.content}"`;
+          break;
+        case 'remove':
+          memoryContent += `Removed memory ${input.id}`;
+          break;
+        case 'update_preference':
+          memoryContent += `Set preference '${input.key}' = '${input.value}'`;
+          break;
+        case 'get_preference':
+          memoryContent += `Retrieved preference '${input.key}'`;
+          if (result?.value) memoryContent += ` = '${result.value}'`;
+          break;
+      }
+
+      // Store the KB operation log as a memory (this won't recurse due to the check above)
+      await kbClient.add(memoryContent, 'kb-operation');
+    } catch (memError) {
+      mcpLogger.warn({
+        event: 'kb_memory_storage_failed',
+        operation,
+        error: memError instanceof Error ? memError.message : String(memError),
+      }, 'Failed to store KB operation as memory');
+    }
+  }
+}
+
 const server = new McpServer({
   name: 'dev-bot-server',
   version: '1.0.0',
@@ -340,14 +394,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Memory added successfully. ID: ${memoryId}` }],
       };
-      logToolCall('kb_add', { content, category, id }, result);
+      await logAndStoreKBOperation('add', { content, category, id }, { id: memoryId });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to add memory: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_add', { content, category, id }, undefined, err);
+      await logAndStoreKBOperation('add', { content, category, id }, undefined, err);
       return result;
     }
   },
@@ -375,14 +429,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Found ${results.length} memories:\n\n${formatted}` }],
       };
-      logToolCall('kb_search', { query, top_k }, result);
+      await logAndStoreKBOperation('search', { query, top_k }, { results });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to search: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_search', { query, top_k }, undefined, err);
+      await logAndStoreKBOperation('search', { query, top_k }, undefined, err);
       return result;
     }
   },
@@ -402,14 +456,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Memory ${id} updated successfully.` }],
       };
-      logToolCall('kb_update', { id, content }, result);
+      await logAndStoreKBOperation('update', { id, content });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to update memory: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_update', { id, content }, undefined, err);
+      await logAndStoreKBOperation('update', { id, content }, undefined, err);
       return result;
     }
   },
@@ -428,14 +482,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Memory ${id} removed successfully.` }],
       };
-      logToolCall('kb_remove', { id }, result);
+      await logAndStoreKBOperation('remove', { id });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to remove memory: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_remove', { id }, undefined, err);
+      await logAndStoreKBOperation('remove', { id }, undefined, err);
       return result;
     }
   },
@@ -455,14 +509,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Preference '${key}' set to '${value}'.` }],
       };
-      logToolCall('kb_update_preference', { key, value }, result);
+      await logAndStoreKBOperation('update_preference', { key, value });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to update preference: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_update_preference', { key, value }, undefined, err);
+      await logAndStoreKBOperation('update_preference', { key, value }, undefined, err);
       return result;
     }
   },
@@ -486,14 +540,14 @@ server.tool(
       const result = {
         content: [{ type: 'text' as const, text: `Preference '${key}' = '${value}'` }],
       };
-      logToolCall('kb_get_preference', { key }, result);
+      await logAndStoreKBOperation('get_preference', { key }, { value });
       return result;
     } catch (err: any) {
       const result = {
         content: [{ type: 'text' as const, text: `Failed to get preference: ${err.message}` }],
         isError: true,
       };
-      logToolCall('kb_get_preference', { key }, undefined, err);
+      await logAndStoreKBOperation('get_preference', { key }, undefined, err);
       return result;
     }
   },

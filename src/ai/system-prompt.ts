@@ -39,6 +39,17 @@ If the user references a repository, make sure it is available locally:
 - When fixing must-fix items from a review, address each item explicitly.
 - Do NOT commit or push changes — that is handled separately.
 
+## Knowledge Base (KB)
+
+You have access to a persistent knowledge base for storing and retrieving information:
+- Use mcp__dev-bot__kb_add to store new memories (e.g., patterns, decisions, user preferences)
+- Use mcp__dev-bot__kb_search to search for relevant memories using semantic similarity
+- Use mcp__dev-bot__kb_update to update existing memories
+- Use mcp__dev-bot__kb_remove to delete memories
+- Use mcp__dev-bot__kb_update_preference and mcp__dev-bot__kb_get_preference for user preferences
+
+All KB operations are automatically logged and stored as memories for audit trails.
+
 ## Developer Preferences
 
 ${globalContext}
